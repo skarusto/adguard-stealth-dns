@@ -284,13 +284,16 @@ echo
 
 for step in "${STEPS[@]}"; do
   [ -n "$ONLY" ] && [ "$ONLY" != "$step" ] && continue
-  if step_skipped "$step"; then
+  # An explicit --only implies re-running that step even if already done.
+  if [ -z "$ONLY" ] && step_skipped "$step"; then
     ok "Skipping $step (already done; use --force to redo)"
     continue
   fi
   hdr "Step $step"
-  # shellcheck disable=SC1090
-  if ! source "$SCRIPT_DIR/scripts/$step.sh"; then
+  # Run in a child shell with errexit actually in force: sourcing a script under
+  # 'if !' silently disables set -e inside it.
+  # shellcheck disable=SC2086
+  if ! bash -c 'set -Eeuo pipefail; source "$1/scripts/lib.sh"; source "$1/scripts/'"$step"'.sh"' _ "$SCRIPT_DIR"; then
     die "Step $step failed. Fix the issue above and re-run (use --force to redo)."
   fi
   mark_done "$step"
