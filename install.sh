@@ -88,8 +88,12 @@ MANIFEST
   for _f in $_files; do
     [ -z "$_f" ] && continue
     mkdir -p "$_tmpdir/$(dirname "$_f")"
-    curl -fsSL --retry 3 --retry-delay 1 --max-time 60 "$RAW/$_f" -o "$_tmpdir/$_f" \
-      || { echo "!! failed to download $_f" >&2; exit 1; }
+    if ! curl -fsSL --retry 3 --retry-delay 1 --max-time 60 "$RAW/$_f" -o "$_tmpdir/$_f" 2>/dev/null; then
+      case "$_f" in
+        docs/*|assets/*|README*|LICENSE) echo "[bootstrap] optional $_f not available, skipping." >&2 ;;
+        *) echo "!! failed to download $_f" >&2; exit 1 ;;
+      esac
+    fi
   done
 
   chmod +x "$_tmpdir/install.sh"
