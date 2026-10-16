@@ -16,18 +16,28 @@ else
 fi
 
 # --- Internet ------------------------------------------------------------
+echo "[preflight] Checking outbound internet access..." >&2
 if ! curl -fsS --max-time 10 https://api.ipify.org >/dev/null 2>&1; then
   die "No outbound internet access (needed to install packages and fetch blocklists)."
 fi
+echo "[preflight] Internet OK." >&2
 
-# --- Domain resolves to this server -------------------------------------
+# --- Public IP (bounded, no silent hangs) -------------------------------
+echo "[preflight] Detecting this server's public IP..." >&2
 PUBLIC_IP="$(detect_public_ip || true)"
-[ -n "$PUBLIC_IP" ] || warn "Could not determine this server's public IP."
+if [ -z "$PUBLIC_IP" ]; then
+  warn "Could not determine this server's public IP (ISP may block the lookup providers)."
+else
+  echo "[preflight] Public IP : $PUBLIC_IP" >&2
+fi
 
-RESOLVED="$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+# --- Domain resolution --------------------------------------------------
+echo "[preflight] Resolving '$DOMAIN' ..." >&2
+RESOLVED="$(timeout 20 getent ahostsv4 "$DOMAIN" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' | sed 's/ $//')"
 if [ -z "$RESOLVED" ]; then
   die "Domain '$DOMAIN' does not resolve. Create the A record first (a prerequisite step)."
 fi
+echo "[preflight] '$DOMAIN' -> $RESOLVED" >&2
 log "Public IP      : ${PUBLIC_IP:-unknown}"
 log "'$DOMAIN' -> $RESOLVED"
 
@@ -41,8 +51,9 @@ if [ -n "$PUBLIC_IP" ] && ! grep -qw "$PUBLIC_IP" <<<"$RESOLVED"; then
     warn "Continuing because --yes was given."
   fi
 else
-  ok "DNS looks correct."
+  ok "[preflight] DNS looks correct."
 fi
+echo "[preflight] DONE." >&2
 
 # --- Required TCP ports are free (or already ours) ----------------------
 for p in 80 443 853; do
