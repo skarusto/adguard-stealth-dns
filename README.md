@@ -72,34 +72,6 @@ DoT host  : tls://<domain>:853
 
 Сохраните секретный путь в менеджер паролей.
 
-## Установка через ИИ-агента
-
-AI-агенты (Codex, OpenCode, Claude Code, …) должны руководствоваться документом
-[`docs/AGENT_INSTALL.md`](docs/AGENT_INSTALL.md), а не этим разделом. Он написан для агента,
-который выполняет установку **по SSH с рабочей станции**, и описывает:
-
-- неинтерактивный контракт: `DOMAIN`, `EMAIL`, `ADMIN_PASS` кладутся в `deploy.env`
-  (mode `600`), затем `./install.sh --yes` **без TTY** (`ssh -T`, `setsid … </dev/null`);
-  TTY плюс отсутствующая переменная — и установщик навсегда зависает на вопросе;
-- почему **код выхода 0 не доказывает успех** — обязательно разбирайте строку
-  `Smoke tests: N passed, 0 failed.` из шага `80-verify`;
-- SSH-гейт префлайта и то, что нужно согласовать с человеком **до** работы с сервером
-  (DNS, доступность порта 80 извне, риск отрезать UFW свой же SSH, секреты никогда в `argv`);
-- внешнюю проверку (заглушка `200`, секретный путь `302`, DoH, DoT), таблицу
-  «симптом → причина → исправление» и жёсткие запреты (`certbot renew --dry-run`,
-  `AdGuardHome --check-config`, раскрытие `:3000`, …).
-
-Пример запуска из агента:
-
-```bash
-VPS=203.0.113.10
-ssh -T root@$VPS 'git clone --depth 1 https://github.com/skarusto/adguard-stealth-dns.git /root/adguard-stealth-dns'
-# затем создайте /root/adguard-stealth-dns/deploy.env (DOMAIN, EMAIL, ADMIN_PASS), chmod 600, и:
-ssh -T root@$VPS 'cd /root/adguard-stealth-dns && setsid ./install.sh --yes </dev/null >/tmp/agent-install.out 2>&1; echo EXIT=$?'
-```
-
-## Сценарии использования
-
 ## Что оказывается установлено
 
 - `/opt/AdGuardHome/AdGuardHome.yaml` — конфиг AdGuard (schema_version зафиксирована)
