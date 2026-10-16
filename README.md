@@ -14,9 +14,9 @@
 - Админ-панель AdGuard — только по адресу `https://<domain>/<secret>/`
 - Один сертификат Let's Encrypt, общий для Caddy (на `:443`) и AdGuard (на `:853`).
 
-## Простая установка
+## Установка
 
-### 1) Пререквизиты
+### Пререквизиты
 
 1. **VPS** под Debian 12/13 или Ubuntu 22.04/24.04 с публичным IPv4 (на других не тестировалось)
 2. **Доступ root**
@@ -25,13 +25,19 @@
 5. **Порты 80/443/853 должны быть свободны.**
 6. **Знайте свои остальные слушающие порты** (SSH = 22 по умолчанию, VPN и т. п.) — установщик покажет каждый слушающий сокет и спросит перед включением файрвола с политикой deny по умолчанию. Актуально, если на VPS установлена, например, Amnezia WG.
 
-### 2) Запустите команду
+### Ванлайн установка
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/skarusto/adguard-stealth-dns/main/install.sh | sudo bash
 ```
 
-Локальная установка:
+### Установка с помощью ИИ агента
+
+```bash
+Install and configure adguard-stealth-dns: https://raw.githubusercontent.com/skarusto/adguard-stealth-dns/refs/heads/main/docs/AGENT_INSTALL.md
+```
+
+### Локальная установка:
 
 ```bash
 git clone https://github.com/skarusto/adguard-stealth-dns.git
@@ -73,32 +79,6 @@ DoT host  : tls://<domain>:853
 
 Сохраните секретный путь в менеджер паролей.
 
-## Установка через ИИ-агента
-
-AI-агенты (Codex, OpenCode, Claude Code, …) должны руководствоваться документом
-[`docs/AGENT_INSTALL.md`](docs/AGENT_INSTALL.md), а не этим разделом. Он написан для агента,
-который выполняет установку **по SSH с рабочей станции**, и описывает:
-
-- неинтерактивный контракт: `DOMAIN`, `EMAIL`, `ADMIN_PASS` кладутся в `deploy.env`
-  (mode `600`), затем `./install.sh --yes` **без TTY** (`ssh -T`, `setsid … </dev/null`);
-  TTY плюс отсутствующая переменная — и установщик навсегда зависает на вопросе;
-- почему **код выхода 0 не доказывает успех** — обязательно разбирайте строку
-  `Smoke tests: N passed, 0 failed.` из шага `80-verify`;
-- SSH-гейт префлайта и то, что нужно согласовать с человеком **до** работы с сервером
-  (DNS, доступность порта 80 извне, риск отрезать UFW свой же SSH, секреты никогда в `argv`);
-- внешнюю проверку (заглушка `200`, секретный путь `302`, DoH, DoT), таблицу
-  «симптом → причина → исправление» и жёсткие запреты (`certbot renew --dry-run`,
-  `AdGuardHome --check-config`, раскрытие `:3000`, …).
-
-Пример запуска из агента:
-
-```bash
-VPS=203.0.113.10
-ssh -T root@$VPS 'git clone --depth 1 https://github.com/skarusto/adguard-stealth-dns.git /root/adguard-stealth-dns'
-# затем создайте /root/adguard-stealth-dns/deploy.env (DOMAIN, EMAIL, ADMIN_PASS), chmod 600, и:
-ssh -T root@$VPS 'cd /root/adguard-stealth-dns && setsid ./install.sh --yes </dev/null >/tmp/agent-install.out 2>&1; echo EXIT=$?'
-```
-
 ## Сценарии использования
 
 ```bash
@@ -112,7 +92,7 @@ sudo ./install.sh --only 50-adguard    # выполнить один шаг (н�
 sudo ./install.sh --uninstall          # удалить всё
 ```
 
-## Что оказывается установлено
+## Что будет установлено
 
 - `/opt/AdGuardHome/AdGuardHome.yaml` — конфиг AdGuard (schema_version зафиксирована)
 - `/etc/caddy/Caddyfile` — виртхост Caddy
