@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
-#
-# install.sh — ONE COMMAND installer for adguard-stealth-dns:
-#   - cloned repo:  sudo ./install.sh
-#   - remote curl:  curl -fsSL https://raw.githubusercontent.com/skarusto/adguard-stealth-dns/main/install.sh | sudo bash
-#
 set -Eeuo pipefail
 
-# ---------------------------------------------------------------------------
-# Mode detection: are we already inside a checkout (scripts/lib.sh present)?
-# ---------------------------------------------------------------------------
 SELF="${BASH_SOURCE[0]:-}"
 _selfdir=""
 if [ -n "$SELF" ] && [ -f "$SELF" ]; then
@@ -16,98 +8,66 @@ if [ -n "$SELF" ] && [ -f "$SELF" ]; then
 fi
 
 if [ -z "$_selfdir" ] || [ ! -f "$_selfdir/scripts/lib.sh" ]; then
-  # ---- CURL MODE: download the whole repo into a temp dir, then run it there ----
   REPO="${REPO:-skarusto/adguard-stealth-dns}"
   BRANCH="${BRANCH:-main}"
   RAW="https://raw.githubusercontent.com/$REPO/$BRANCH"
   _tmpdir="$(mktemp -d /tmp/adguard-deploy.XXXXXX)"
   trap 'rm -rf "$_tmpdir"' EXIT
   echo "[bootstrap] Downloading $REPO@$BRANCH into $_tmpdir ..."
-
-  # First try the GitHub tree API to get the exact file list; fall back to a
-  # committed manifest if that fails (offline-ish / rate-limited).
+  _MANIFEST="install.sh
+scripts/lib.sh
+scripts/00-preflight.sh
+scripts/10-base.sh
+scripts/20-firewall.sh
+scripts/30-caddy.sh
+scripts/40-cert.sh
+scripts/50-adguard.sh
+scripts/60-decoy.sh
+scripts/70-caddyfile.sh
+scripts/80-verify.sh
+scripts/90-uninstall.sh
+templates/Caddyfile
+templates/AdGuardHome.service
+templates/adguard-shared-cert.sh
+templates/patch-adguard-config.py
+assets/index.html
+docs/MANUAL.md
+docs/MANUAL.ru.md
+README.md
+README.ru.md
+LICENSE"
   _files=""
-  if command -v curl >/dev/null 2>&1; then
-    _files="$(curl -fsSL --max-time 15 \
-      "https://api.github.com/repos/$REPO/git/trees/$BRANCH?recursive=1" 2>/dev/null \
-      | grep -E '"path":' | sed -E 's/.*"path": *"([^"]+)".*/\1/')"
+  if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    _live="$(curl -fsSL --max-time 15 "https://api.github.com/repos/$REPO/git/trees/$BRANCH?recursive=1" 2>/dev/null | python3 -c 'import sys,json
+try:
+ d=json.load(sys.stdin)
+ print("\n".join(x["path"] for x in d.get("tree",[]) if x.get("type")=="blob"))
+except Exception: pass
+' 2>/dev/null)"
+    [ -n "$_live" ] && _files="$_live"
   fi
-  if [ -z "$_files" ]; then
-    cat >/dev/null <<'MANIFEST'
-install.sh
-scripts/lib.sh
-scripts/00-preflight.sh
-scripts/10-base.sh
-scripts/20-firewall.sh
-scripts/30-caddy.sh
-scripts/40-cert.sh
-scripts/50-adguard.sh
-scripts/60-decoy.sh
-scripts/70-caddyfile.sh
-scripts/80-verify.sh
-scripts/90-uninstall.sh
-templates/Caddyfile
-templates/AdGuardHome.service
-templates/adguard-shared-cert.sh
-templates/patch-adguard-config.py
-assets/index.html
-docs/MANUAL.md
-docs/MANUAL.ru.md
-README.md
-README.ru.md
-LICENSE
-MANIFEST
-    _files=""
-    while IFS= read -r _f; do [ -n "$_f" ] && _files="$_files$_f"$'\n'; done \
-      <<'MANIFEST'
-install.sh
-scripts/lib.sh
-scripts/00-preflight.sh
-scripts/10-base.sh
-scripts/20-firewall.sh
-scripts/30-caddy.sh
-scripts/40-cert.sh
-scripts/50-adguard.sh
-scripts/60-decoy.sh
-scripts/70-caddyfile.sh
-scripts/80-verify.sh
-scripts/90-uninstall.sh
-templates/Caddyfile
-templates/AdGuardHome.service
-templates/adguard-shared-cert.sh
-templates/patch-adguard-config.py
-assets/index.html
-docs/MANUAL.md
-docs/MANUAL.ru.md
-README.md
-README.ru.md
-LICENSE
-MANIFEST
-  fi
-
-  for _f in $_files; do
+  [ -n "$_files" ] || _files="$_MANIFEST"
+  _fail=0
+  while IFS= read -r _f; do
     [ -z "$_f" ] && continue
     mkdir -p "$_tmpdir/$(dirname "$_f")"
     if ! curl -fsSL --retry 3 --retry-delay 1 --max-time 60 "$RAW/$_f" -o "$_tmpdir/$_f" 2>/dev/null; then
       case "$_f" in
         docs/*|assets/*|README*|LICENSE) echo "[bootstrap] optional $_f not available, skipping." >&2 ;;
-        *) echo "!! failed to download $_f" >&2; exit 1 ;;
+        *) echo "!! failed to download $_f" >&2; _fail=1 ;;
       esac
     fi
-  done
-
+  done <<< "$_files"
+  [ "$_fail" = "1" ] && exit 1
   chmod +x "$_tmpdir/install.sh"
-  # Hand off to the downloaded copy (which now has scripts/lib.sh beside it).
   exec bash "$_tmpdir/install.sh" "$@"
 fi
 
-# ---------------------------------------------------------------------------
-# From this point on we are in CLONE mode (install.sh is next to scripts/).
-# ---------------------------------------------------------------------------
 SCRIPT_DIR="$_selfdir"
 REPO_DIR="$SCRIPT_DIR"
 
-# --- real installer body (cloned into scripts/ alongside) ------------------ for a stealth AdGuard Home DNS gateway:
+#
+# install.sh — one-command deployer for a stealth AdGuard Home DNS gateway:
 # public DoH + DoT only, hidden admin UI behind a secret path, decoy front site.
 #
 # Usage:
