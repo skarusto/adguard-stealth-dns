@@ -103,3 +103,8 @@ Backups created during install stay on the box:
 ## Licence
 
 MIT. See LICENSE.
+
+
+## One-line install
+
+    curl -fsSL https://raw.githubusercontent.com/skarusto/adguard-stealth-dns/main/install.sh | sudo bash
