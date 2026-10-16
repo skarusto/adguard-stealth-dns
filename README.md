@@ -2,7 +2,7 @@
 
 # AdGuard Home + фейковый веб-сайт
 
-Ванлайн установщик, устанавливающий публичный
+Устанавливка публичного
 **резолвер DNS-over-HTTPS (DoH) + DNS-over-TLS (DoT)** на базе AdGuard Home,
 где корень домена отдаёт фейковый сайт-заглушку, а админ-панель AdGuard
 спрятана за длинным секретным путём.
@@ -16,7 +16,7 @@
 
 ## Простая установка
 
-### 1) Пререквизиты
+### Пререквизиты
 
 1. **VPS** под Debian 12/13 или Ubuntu 22.04/24.04 с публичным IPv4 (на других не тестировалось)
 2. **Доступ root**
@@ -25,13 +25,19 @@
 5. **Порты 80/443/853 должны быть свободны.**
 6. **Знайте свои остальные слушающие порты** (SSH = 22 по умолчанию, VPN и т. п.) — установщик покажет каждый слушающий сокет и спросит перед включением файрвола с политикой deny по умолчанию. Актуально, если на VPS установлена, например, Amnezia WG.
 
-### 2) Запустите команду
+### Ванолайн установка
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/skarusto/adguard-stealth-dns/main/install.sh | sudo bash
 ```
 
-Локальная установка:
+### Для ИИ агентов
+
+```bash
+Install and configure adguard-stealth-dns: https://raw.githubusercontent.com/skarusto/adguard-stealth-dns/refs/heads/main/docs/AGENT_INSTALL.md
+```
+
+### Локальная установка:
 
 ```bash
 git clone https://github.com/skarusto/adguard-stealth-dns.git
