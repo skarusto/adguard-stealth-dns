@@ -19,7 +19,9 @@ else
     -d "$DOMAIN" \
     -m "$EMAIL" \
     --agree-tos --no-eff-email --non-interactive
-  [ -s "$CERT_LIVE/fullchain.pem" ] || die "certbot did not produce a certificate."
+  if [ ! -s "$CERT_LIVE/fullchain.pem" ]; then
+    die "certbot did not issue a certificate for $DOMAIN.\n  Likely causes: DNS record for $DOMAIN is absent/wrong, or port 80 is closed (check BOTH UFW and the cloud-provider firewall).\n  Test: curl -I https://$DOMAIN  from another machine.\n  Logs: journalctl -u caddy --since '5min ago' --no-pager | tail -30"
+  fi
   ok "Certificate issued."
 fi
 

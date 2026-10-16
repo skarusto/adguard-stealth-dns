@@ -12,7 +12,9 @@ else
   log "Installing AdGuard Home via the official installer..."
   curl -s -S -L https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh \
     | sh -s -- -v
-  [ -x "$AG_BIN" ] || die "AdGuard Home binary not found after install."
+  if [ ! -x "$AG_BIN" ]; then
+     die "AdGuard Home binary not found after install at $AG_BIN.\n  Fix: verify internet access and re-run; check /tmp/opencode? or proxy.\n  Fallback: manually run the official installer from https://adguard.com/adguard-home.html"
+  fi
   ok "AdGuard Home installed."
 fi
 
@@ -29,7 +31,9 @@ if [ ! -s "$AG_CFG" ]; then
   for _ in $(seq 1 25); do [ -s "$AG_CFG" ] && break; sleep 1; done
   pkill -f "$AG_BIN" 2>/dev/null || true
   sleep 1
-  [ -s "$AG_CFG" ] || die "AdGuard did not generate $AG_CFG (see /tmp/adguard-firstrun.log)."
+  if [ ! -s "$AG_CFG" ]; then
+     die "AdGuard did not generate $AG_CFG (see /tmp/adguard-firstrun.log).\n  Likely: binary failed to start (port collision / permission).\n  Try running: /opt/AdGuardHome/AdGuardHome -c /opt/AdGuardHome/AdGuardHome.yaml -w /opt/AdGuardHome --no-check-update"
+  fi
   ok "Default config generated."
 fi
 
@@ -74,7 +78,7 @@ if wait_service_active AdGuardHome 30; then
 else
   err "AdGuardHome failed to start. Recent logs:"
   journalctl -u AdGuardHome -n 30 --no-pager >&2 || true
-  die "AdGuard Home did not start."
+  die "AdGuard Home did not start.\n  Inspect: systemctl status AdGuardHome && journalctl -u AdGuardHome -n 40 --no-pager\n  Confirm /opt/AdGuardHome/AdGuardHome.yaml is valid YAML and schema_version is current."
 fi
 
 # --- 8. Sanity check listeners -------------------------------------------

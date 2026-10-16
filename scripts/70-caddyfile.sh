@@ -11,7 +11,7 @@ chmod 644 "$CADDYFILE"
 log "Caddyfile written to $CADDYFILE"
 log "Running 'caddy validate'..."
 if ! caddy validate --config "$CADDYFILE"; then
-  die "Caddyfile validation failed."
+  die "Caddyfile validation failed.\n  Fix the file at /etc/caddy/Caddyfile (inspect prints above).\n  Most often: a typo in the secret path, or wrong TLS path.\n  Re-run with --only 70-caddyfile after fixing."
 fi
 ok "Caddyfile is valid."
 

@@ -5,7 +5,7 @@ if [ "${SKIP_FIREWALL:-no}" = "yes" ]; then
   return 0 2>/dev/null || true
 fi
 
-require_cmd ufw
+require_cmd ufw || { err "ufw not found; install with: apt-get install -y ufw"; die "ufw package missing"; }
 
 log "Currently listening sockets (for your reference):"
 ss -tlnp 2>/dev/null | awk 'NR==1 || /LISTEN/' | sed 's/^/    /' >&2 || true
@@ -18,8 +18,8 @@ if [ "$ASSUME_YES" != "yes" ]; then
   [ "$FW_ACK" = "yes" ] || { warn "Skipping firewall by user request."; return 0 2>/dev/null || true; }
 fi
 
-ufw default deny incoming
-ufw default allow outgoing
+ufw default deny incoming || die "Failed to set default deny (ufw internal error). Ensure ufw is installed."
+ufw default allow outgoing || die "Failed to set default allow outgoing."
 
 # SSH first — never lock yourself out.
 ufw allow "${SSH_PORT}/tcp" comment 'SSH'
@@ -43,7 +43,7 @@ if [ -f /etc/default/ufw ]; then
   fi
 fi
 
-ufw --force enable
+ufw --force enable || die "Failed to enable ufw. Check /etc/default/ufw and run 'ufw --force enable' manually to see the error."
 systemctl enable ufw >/dev/null 2>&1 || true
 ufw status verbose | sed 's/^/    /' >&2
 
