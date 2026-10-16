@@ -23,10 +23,14 @@ fi
 echo "[preflight] Internet OK." >&2
 
 # --- Public IP (bounded, no silent hangs) -------------------------------
-echo "[preflight] Detecting this server's public IP..." >&2
-PUBLIC_IP="$(detect_public_ip || true)"
+echo "[preflight] Detecting this server's public IP (single attempt, 8s max)..." >&2
+PUBLIC_IP="$(curl -fsS --max-time 8 https://api.ipify.org 2>/dev/null)" || PUBLIC_IP=""
+if [ -z "$PUBLIC_IP" ]; then
+  PUBLIC_IP="$(curl -fsS --max-time 8 https://icanhazip.com 2>/dev/null)" || PUBLIC_IP=""
+fi
 if [ -z "$PUBLIC_IP" ]; then
   warn "Could not determine this server's public IP (ISP may block the lookup providers)."
+  PUBLIC_IP=""
 else
   echo "[preflight] Public IP : $PUBLIC_IP" >&2
 fi
