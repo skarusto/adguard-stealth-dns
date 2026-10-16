@@ -1,5 +1,8 @@
 # adguard-stealth-dns
 
+**English** · [Русский](README.ru.md)
+
+
 A one-command deployer that turns a fresh Debian/Ubuntu VPS into a public
 **DNS-over-HTTPS (DoH) + DNS-over-TLS (DoT) only** resolver backed by
 AdGuard Home, where the domain root serves a believable decoy website and the

@@ -1,4 +1,4 @@
-# README.ru.md
+[English](README.md) · **Русский**
 
 # adguard-stealth-dns
 
