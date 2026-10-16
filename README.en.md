@@ -70,6 +70,32 @@ DoT host  : tls://<domain>:853
 
 Save the secret path to a password manager — it is the entire obscurity layer.
 
+## Installing with an AI agent
+
+AI agents (Codex, OpenCode, Claude Code, …) should follow
+[`docs/AGENT_INSTALL.md`](docs/AGENT_INSTALL.md) instead of this section. It is written for an
+agent driving the install **over SSH from a workstation** and covers:
+
+- the non-interactive contract — `DOMAIN`, `EMAIL`, `ADMIN_PASS` go into a mode-`600`
+  `deploy.env`, then `./install.sh --yes` with **no TTY** (`ssh -T`, `setsid … </dev/null`);
+  a TTY plus a missing variable means the installer blocks on a prompt forever;
+- why **exit code 0 is not proof of success** — you must parse
+  `Smoke tests: N passed, 0 failed.` from step `80-verify`;
+- the SSH preflight gate and what must be confirmed with a human *before* touching the box
+  (DNS, port 80 reachable from outside, UFW lockout risk, secrets never in `argv`);
+- external verification (decoy `200`, secret path `302`, DoH, DoT), a symptom→fix failure
+  playbook, and hard "never do this" rules (`certbot renew --dry-run`,
+  `AdGuardHome --check-config`, exposing `:3000`, …).
+
+Quick start from an agent:
+
+```bash
+VPS=203.0.113.10
+ssh -T root@$VPS 'git clone --depth 1 https://github.com/skarusto/adguard-stealth-dns.git /root/adguard-stealth-dns'
+# then create /root/adguard-stealth-dns/deploy.env (DOMAIN, EMAIL, ADMIN_PASS), chmod 600, and:
+ssh -T root@$VPS 'cd /root/adguard-stealth-dns && setsid ./install.sh --yes </dev/null >/tmp/agent-install.out 2>&1; echo EXIT=$?'
+```
+
 ## Usage scenarios
 
 ```bash
@@ -123,6 +149,7 @@ Backups created during install stay on the box:
 
 - [`docs/MANUAL.md`](docs/MANUAL.md) — complete step-by-step manual (English).
 - [`docs/MANUAL.ru.md`](docs/MANUAL.ru.md) — то же руководство на русском.
+- [`docs/AGENT_INSTALL.md`](docs/AGENT_INSTALL.md) — installation manual for AI agents (Codex, OpenCode, …) driving the deploy over SSH.
 
 ## Security notes
 
