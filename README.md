@@ -1,39 +1,38 @@
+**Русский** · [English](README.en.md)
+
 # adguard-stealth-dns
 
-**English** · [Русский](README.ru.md)
+Однокомандный развёртыватель, превращающий свежий VPS под Debian/Ubuntu в публичный
+**резолвер только DNS-over-HTTPS (DoH) + DNS-over-TLS (DoT)** на базе AdGuard Home,
+где корень домена отдаёт правдоподобный сайт-приманку, а админ-панель AdGuard
+живёт за длинным секретным путём (без HTTP Basic Auth).
 
+## Что получается
 
-A one-command deployer that turns a fresh Debian/Ubuntu VPS into a public
-**DNS-over-HTTPS (DoH) + DNS-over-TLS (DoT) only** resolver backed by
-AdGuard Home, where the domain root serves a believable decoy website and the
-AdGuard admin UI lives behind a long secret path (no HTTP Basic Auth).
+- Публичные резолверы по адресу `https://<domain>/dns-query` и `tls://<domain>:853`. Без обычного DNS.
+- Сайт-приманка «корпоративный файловый менеджер» на `/` (и на любом другом пути), чтобы сканеры видели безобидную страницу.
+- Админ-панель AdGuard — только по адресу `https://<domain>/<secret>/`, перенаправляя на собственную страницу входа AdGuard; сам секретный путь и есть слой обскурации.
+- Один сертификат Let's Encrypt, общий для Caddy (на `:443`) и AdGuard (на `:853`).
+- Идемпотентно, продолжаемо возобновлять, логи в `/var/log/adguard-deploy.log`.
 
-## What you get
+## Установка (одна команда)
 
-- Public resolvers on `https://<domain>/dns-query` and `tls://<domain>:853`. No plain DNS.
-- A decoy "corporate file manager" site on `/` (and every other path) so scanners see an innocuous page.
-- The AdGuard admin UI only at `https://<domain>/<secret>/`, forwarding to AdGuard's own login — the secret path itself is the obscurity.
-- A single Let's Encrypt certificate shared by Caddy (for `:443`) and AdGuard (for `:853`).
-- Fully idempotent and resumable; log in `/var/log/adguard-deploy.log`.
+### 1) Подготовка, которую надо сделать вручную (это невозможно автоматизировать)
 
-## Installation (one line)
+1. **VPS** под Debian 12/13 или Ubuntu 22.04/24.04 с публичным IPv4.
+2. **Доступ root** (запуск от root via `sudo -i`).
+3. **Имя домена, чья A (AAAA)-запись уже указывает на IP VPS.** Установщик откажется работать, если DNS не разрешается на этот сервер. Настройте его у регистратора/DNS-провайдера (или DuckDNS / linkpc.net / afraid.org) до запуска.
+4. **Входящие порты 80, 443, 853 доступны** из интернета — проверьте файрвол провайдера **и** облака.
+5. **Порты 80/443/853 должны быть свободны.**
+6. **Знайте свои остальные слушающие порты** (SSH = 22 по умолчанию, VPN и т. п.) — установщик покажет каждый слушающий сокет и спросит перед включением файрвола с политикой deny по умолчанию.
 
-### 1) Prerequisites you must do first (these cannot be automated)
-
-1. **A VPS** running Debian 12/13 or Ubuntu 22.04/24.04 with a public IPv4 address.
-2. **Root access** — run as root (`sudo -i`).
-3. **A domain name whose A (AAAA) record already points at the VPS IP.** The installer aborts if DNS does not resolve to this server. Set it up at your registrar/DNS provider (or DuckDNS / linkpc.net / afraid.org) before running.
-4. **Inbound ports 80, 443, 853 reachable** from the internet — check both your cloud provider's firewall *and* your router.
-5. **Ports 80/443/853 must be free** — nothing else may listen on them.
-6. **Know your other listening ports** (SSH = 22 by default, VPNs, etc.) — the installer shows you every listening socket and asks before enabling the deny-by-default firewall.
-
-### 2) Run the one-liner
+### 2) Запустите одну команду
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/skarusto/adguard-stealth-dns/main/install.sh | sudo bash
 ```
 
-If you prefer not to pipe to `bash`, clone and run locally:
+Если не хотите pipe-ить в `bash`, клонируйте и запустите локально:
 
 ```bash
 git clone https://github.com/skarusto/adguard-stealth-dns.git
@@ -41,97 +40,75 @@ cd adguard-stealth-dns
 sudo ./install.sh
 ```
 
-### 3) What happens next (8 steps, all automatic)
+### 3) Что происходит дальше (8 шагов, всё автоматически)
 
-| Step | What |
+| Шаг | Что |
 |---|---|
-| 00-preflight | OS, internet, DNS resolving to this box, required ports free |
-| 10-base | apt packages, timezone |
-| 20-firewall | restrictive UFW (SSH + 80 + 443 + 853) |
-| 30-caddy | install Caddy, stop for the port-80 ACME challenge |
-| 40-cert | certbot (standalone) + shared cert + deploy hook |
-| 50-adguard | AdGuard Home from the official installer + patched config |
-| 60-decoy | fetch the decoy HTML (vendored fallback included) |
-| 70-caddyfile | generate + validate + start the Caddy vhost |
-| 80-verify | smoke tests (DoH, decoy, secret redirect, DoT cert, listeners) |
+| 00-preflight | ОС, интернет, DNS указывает на этот сервер, нужные порты свободны |
+| 10-base | пакеты apt, часовой пояс |
+| 20-firewall | жёсткий UFW (SSH + 80 + 443 + 853) |
+| 30-caddy | установка Caddy, остановка для проверки на порту 80 |
+| 40-cert | certbot (standalone) + общий сертификат + deploy-хук |
+| 50-adguard | AdGuard Home из официального установщика + патчинг конфига |
+| 60-decoy | загрузка HTML приманки (встроенная копия как запасной вариант) |
+| 70-caddyfile | генерация + проверка + запуск виртхоста Caddy |
+| 80-verify | smoke-тесты (DoH, приманка, редирект секретного пути, сертификат DoT, слушатели) |
 
-The installer asks 4 questions interactively (domain, email, admin username,
-admin password — the secret path is generated for you) and saves the answers
-to `deploy.env` (mode `0600`, **keep it private**). Resume / re-run: every
-step is skipped if already done; `--force` redoes everything; `--only 50-adguard`
-runs a single step; `--uninstall` tears everything down.
+Установщик задаст 4 вопроса (домен, email, имя администратора, пароль —
+секретный путь сгенерирует сам) и сохранит ответы в `deploy.env`
+(mode `0600`, **храните приватно**). Возобновить/повторить: уже
+выполненные шаги пропускаются; `--force` — redo всё; `--only 50-adguard` —
+один шаг; `--uninstall` — снести всё.
 
-**At the end**, the installer prints:
+**В конце** установщик выведет:
 ```
 Admin URL : https://<domain>/<secret>/
 DoH URL   : https://<domain>/dns-query
 DoT host  : tls://<domain>:853
 ```
 
-Save the secret path to a password manager — it is the entire obscurity layer.
+Сохраните секретный путь в менеджер паролей — это весь слой обскурации.
 
-## Usage scenarios
+## Сценарии использования
 
-```bash
-# interactive (asks everything)
-sudo ./install.sh
-sudo ./install.sh -y                   # accept defaults (only after deploy.env exists)
-sudo ./install.sh --yes                # same
-sudo ./install.sh --config ./prod.env  # use a specific config file
-sudo ./install.sh --force              # redo every step
-sudo ./install.sh --only 50-adguard    # run one step
-sudo ./install.sh --uninstall          # tear everything down
-```
+## Что оказывается установлено
 
-Configuration can also be supplied via environment variables (highest priority):
-`DOMAIN`, `EMAIL`, `SECRET_PATH`, `ADMIN_USER`, `ADMIN_PASS`, `TIMEZONE`,
-`SSH_PORT`, `EXTRA_ALLOW`, `SKIP_FIREWALL`, `DO_UPGRADE`,
-`ENABLE_DEFAULT_FILTERS`, `DECOY_URL`, `ADGUARD_UPSTREAMS`,
-`ADGUARD_BOOTSTRAP`, `ADGUARD_FALLBACK`.
+- `/opt/AdGuardHome/AdGuardHome.yaml` — конфиг AdGuard (schema_version зафиксирована)
+- `/etc/caddy/Caddyfile` — виртхост Caddy
+- `/var/www/fake/index.html` — сайт-приманка
+- `/etc/ssl/adguard/{fullchain,privkey}.pem` — общий сертификат под управлением deploy-хука certbot
+- `/etc/systemd/system/AdGuardHome.service` — детерминированный юнит (работает от root, чтобы занять `:853`)
 
-## What you end up with
+Сервисы включены: `caddy`, `AdGuardHome`, `certbot.timer`, `ufw`. AdGuard
+привязывает интерфейс админки/DoH **только** к `127.0.0.1:3000`; обычный
+DNS и DoQ отключены; DoT открыт на `:853`.
 
-- `/opt/AdGuardHome/AdGuardHome.yaml` — AdGuard config (schema_version pinned)
-- `/etc/caddy/Caddyfile` — Caddy vhost
-- `/var/www/fake/index.html` — decoy front site
-- `/etc/ssl/adguard/{fullchain,privkey}.pem` — shared certificate managed by a certbot deploy hook
-- `/etc/systemd/system/AdGuardHome.service` — deterministic unit (runs as root, so it can bind `:853`)
+## Важные замечания
 
-Services enabled: `caddy`, `AdGuardHome`, `certbot.timer`, `ufw`. AdGuard binds
-the admin / DoH interface on `127.0.0.1:3000` **only**; plain DNS and DoQ are
-disabled; DoT is public on `:853`.
+- **Секретный путь — это весь слой обскурации.** Выбирайте длинное непредсказуемое значение (установщик генерирует 16 hex-символов по умолчанию) и никогда не публикуйте.
+- **Не запускайте `certbot renew --dry-run`** при установленном deploy-хуке: хук скопирует *staging*-сертификат на место. Сначала отключите хук.
+- **UFW по умолчанию закрывает всё.** Добавляйте порты VPN/приложений через переменную окружения `EXTRA_ALLOW` (например `EXTRA_ALLOW="51820/udp 64672/udp"`).
+- В AdGuard Home ~v0.107.x **`--check-config` может зависнуть** и захватить `:3000` (поэтому шаг `50-adguard` его избегает; конфиги проверяются структурно).
+- Форма приманки работает только на стороне клиента — нигде не отправляет учётные данные.
 
-## Important caveats
+## Откат
 
-- **Secret path is the whole obscurity layer** — pick a long, unguessable value
-  (the installer generates 16 hex chars by default) and never publish it.
-- **Do not run `certbot renew --dry-run`** with the deploy hook installed: the
-  hook would copy a *staging* certificate into place. Disable the hook first.
-- **UFW blocks everything else by default** — add VPN/app ports via the
-  `EXTRA_ALLOW` env var (e.g. `EXTRA_ALLOW="51820/udp 64672/udp"`).
-- On AdGuard Home ~v0.107.x, **`--check-config` can hang and lock `:3000`**
-  (so the `50-adguard` step avoids it; configs are validated structurally).
-- The decoy form is client-side only — it never sends credentials anywhere.
+Резервные копии остаются на сервере: `/root/AdGuardHome.yaml.bak.<timestamp>`.
+Примените нужную вручную или выполните `sudo ./install.sh --uninstall`.
 
-## Roll back
+## Полная документация
 
-Backups created during install stay on the box:
-`/root/AdGuardHome.yaml.bak.<timestamp>`. Re-apply one manually, or run
-`sudo ./install.sh --uninstall`.
-
-## Full documentation
-
-- [`docs/MANUAL.md`](docs/MANUAL.md) — complete step-by-step manual (English).
+- [`docs/MANUAL.md`](docs/MANUAL.md) — полное пошаговое руководство (английский).
 - [`docs/MANUAL.ru.md`](docs/MANUAL.ru.md) — то же руководство на русском.
 
-## Security notes
+## Примечания по безопасности
 
-- AdGuard binds the admin/DoH on `127.0.0.1:3000` **only**; DoT is public on `:853`; plain DNS and DoQ are off.
-- AdGuard runs as root (so it can bind `:853`). Change if you know what you're doing.
-- The secret admin path is the obscurity layer — pick a long, unguessable value (the installer generates one by default) and never publish it.
-- **Do not run `certbot renew --dry-run`** with the deploy hook installed — the hook would copy a staging certificate into place.
-- On AdGuard Home ~v0.107.x, **`--check-config` can hang and lock `:3000`** — the installer script deliberately avoids it.
+- AdGuard привязывает админку/DoH только к `127.0.0.1:3000`; DoT открыт на `:853`; обычный DNS и DoQ отключены.
+- AdGuard работает от root (чтобы занять `:853`). Меняйте, если понимаете последствия.
+- Секретный путь — весь слой обскурации. Выбирайте длинное непредсказуемое значение (генерируется по умолчанию) и не публикуйте.
+- Не запускайте `certbot renew --dry-run` при установленном deploy-хуке — скопирует staging-сертификат.
+- В ~v0.107.x `--check-config` может зависнуть и захватить `:3000` — скрипт его избегает.
 
-## License
+## Лицензия
 
-MIT. See [LICENSE](LICENSE).
+MIT. См. [LICENSE](LICENSE).
