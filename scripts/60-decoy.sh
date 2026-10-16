@@ -1,8 +1,8 @@
 # 60-decoy.sh — install the fake corporate file-manager front site.
 
-log "Downloading the decoy index page from $DECOY_URL"
+log "Downloading the decoy index page from $DECOY_URL (max 30s)..."
 install -d -m 755 /var/www/fake
-if ! curl -fsSL -o /var/www/fake/index.html "$DECOY_URL"; then
+if ! curl -fsSL --max-time 30 -o /var/www/fake/index.html "$DECOY_URL"; then
   # Fallback to the copy vendored in the repo.
   if [ -s "$REPO_DIR/assets/index.html" ]; then
     warn "Download failed; using the vendored copy from the repo."

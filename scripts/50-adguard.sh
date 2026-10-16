@@ -23,6 +23,7 @@ sleep 1
 
 # --- 3. Make sure a config exists; let AdGuard generate a default if not --
 if [ ! -s "$AG_CFG" ]; then
+    log "No config found; starting AdGuard to generate a default config (max 25s)."
   log "No config present; starting AdGuard briefly so it writes a default config..."
   ( cd "$AG_DIR" && "$AG_BIN" -w "$AG_DIR" --no-check-update >/tmp/adguard-firstrun.log 2>&1 & )
   for _ in $(seq 1 25); do [ -s "$AG_CFG" ] && break; sleep 1; done

@@ -17,6 +17,7 @@ ok "Caddyfile is valid."
 
 systemctl enable caddy >/dev/null 2>&1 || true
 systemctl restart caddy
+  log "Waiting up to 30s for Caddy to start..."
 if wait_service_active caddy 30; then
   ok "Caddy is active."
 else
