@@ -161,6 +161,12 @@ if [ "$DO_UNINSTALL" != "yes" ]; then
 
   hdr "Configuration"
 
+  # If there is no interactive tty, refuse to silently hang on prompts.
+  if [ ! -r /dev/tty ] && [ "$ASSUME_YES" != "yes" ]; then
+    die "No interactive terminal detected after preflight. Re-run with \
+         DOMAIN=... EMAIL=... ADMIN_PASS=... ./install.sh --yes  (or provide deploy.env)."
+  fi
+
   ask DOMAIN "Public domain (must already point an A/AAAA record at this server)" ""
   ask EMAIL  "Contact email for Let's Encrypt" ""
 
