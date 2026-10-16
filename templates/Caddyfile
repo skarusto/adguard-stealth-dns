@@ -1,0 +1,33 @@
+{
+	email __DOMAIN__
+}
+
+__DOMAIN__ {
+	encode zstd gzip
+
+	tls /etc/ssl/adguard/fullchain.pem /etc/ssl/adguard/privkey.pem
+
+	# 1. Public DoH endpoint (RFC 8484), GET + POST -> AdGuard Home
+	handle /dns-query {
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	# 2. Bare secret path -> redirect to the trailing-slash variant
+	handle __SECRET_PATH__ {
+		redir __SECRET_PATH__/ 302
+	}
+
+	# 3. Secret admin UI -> AdGuard, prefix stripped upstream; re-prefix Location
+	handle __SECRET_PATH__/* {
+		uri strip_prefix __SECRET_PATH__
+		header >Location ^/(.*)$ __SECRET_PATH__/$1
+		reverse_proxy 127.0.0.1:3000
+	}
+
+	# 4. Everything else -> the decoy front site
+	handle {
+		root * /var/www/fake
+		try_files {path} /index.html
+		file_server
+	}
+}
