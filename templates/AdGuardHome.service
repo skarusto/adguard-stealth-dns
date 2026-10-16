@@ -9,5 +9,14 @@ ExecStart=/opt/AdGuardHome/AdGuardHome -c /opt/AdGuardHome/AdGuardHome.yaml -w /
 Restart=on-failure
 RestartSec=10
 
+# Hardening (safe set): /opt stays writable under ProtectSystem=full, so the
+# binary can still write its own config/logs/querylog.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
 [Install]
 WantedBy=multi-user.target

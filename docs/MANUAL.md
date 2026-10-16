@@ -51,7 +51,7 @@ Everything below is copy-pasteable. Replace the placeholders in §0 with your ow
 Generate a secret path (do this once, keep it):
 
 ```bash
-SECRET_PATH="/$(openssl rand -hex 8)"   # -> /a1b2c3d4e5f60718
+SECRET_PATH="/$(openssl rand -hex 16)"   # -> /a1b2c3d4e5f60718a1b2c3d4e5f60718  (16 bytes / 32 hex)
 echo "$SECRET_PATH"
 ```
 
@@ -60,7 +60,7 @@ Set shell variables for the rest of this manual (paste as one block, edit values
 ```bash
 DOMAIN="dns.example.com"
 EMAIL="you@example.com"
-SECRET_PATH="/a1b2c3d4e5f60718"
+SECRET_PATH="/a1b2c3d4e5f60718a1b2c3d4e5f60718"
 ADMIN_USER="admin"
 ADMIN_PASS="CHANGE_ME_TO_SOMETHING_STRONG"
 ```
@@ -198,10 +198,10 @@ ufw allow 853/tcp         # DoT
 # ufw allow 64672/udp     # AmneziaWG
 # ufw allow 58472/tcp     # some app you run
 
-# If the box routes a VPN, keep forwarding intact:
-grep -q '^DEFAULT_FORWARD_POLICY="ACCEPT"' /etc/default/ufw \
-  && echo "forward already ACCEPT" \
-  || sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+# ONLY if this box actually routes VPN traffic, keep forwarding intact. The
+# installer makes this opt-in (VPN_FORWARDING=yes) and leaves the file alone by
+# default:
+# sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
 
 ufw --force enable
 ufw status verbose
@@ -428,8 +428,9 @@ systemctl enable AdGuardHome
 
 ```bash
 install -d -m 755 /var/www/fake
-curl -fsSL -o /var/www/fake/index.html \
-  https://raw.githubusercontent.com/Liafanx/MTProxyL/refs/heads/main/templates_html/filemanager.html
+# The installer uses the repo-vendored copy by default; set DECOY_URL to fetch a
+# remote page instead. Manual equivalent (from a repo checkout):
+cp /root/adguard-stealth-dns/assets/index.html /var/www/fake/index.html
 chmod 644 /var/www/fake/index.html
 ```
 
@@ -449,7 +450,7 @@ Replace `/etc/caddy/Caddyfile` with the following (substitute `DOMAIN` and `SECR
 
 ```caddyfile
 {
-	email your@email.example     # used if Caddy ever does ACME; harmless here
+	email you@example.com        # ACME contact; the installer substitutes EMAIL here
 }
 
 # (Optional) trust nothing special; Caddy passes X-Forwarded-* by default.

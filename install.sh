@@ -50,6 +50,12 @@ except Exception: pass
   _fail=0
   while IFS= read -r _f; do
     [ -z "$_f" ] && continue
+    case "$_f" in
+      /*|*..*)
+        echo "!! refusing suspicious manifest path: $_f" >&2
+        exit 1
+        ;;
+    esac
     mkdir -p "$_tmpdir/$(dirname "$_f")"
     if ! curl -fsSL --retry 3 --retry-delay 1 --max-time 60 "$RAW/$_f" -o "$_tmpdir/$_f" 2>/dev/null; then
       case "$_f" in
@@ -60,7 +66,12 @@ except Exception: pass
   done <<< "$_files"
   [ "$_fail" = "1" ] && exit 1
   chmod +x "$_tmpdir/install.sh"
-  exec bash "$_tmpdir/install.sh" "$@"
+  mkdir -p /etc/adguard-deploy
+  export CONFIG_FILE="${CONFIG_FILE:-/etc/adguard-deploy/deploy.env}"
+  _rc=0
+  bash "$_tmpdir/install.sh" "$@" || _rc=$?
+  rm -rf "$_tmpdir"
+  exit "$_rc"
 fi
 
 SCRIPT_DIR="$_selfdir"
@@ -79,10 +90,6 @@ REPO_DIR="$SCRIPT_DIR"
 #   sudo ./install.sh --uninstall          # tear everything down
 #   sudo ./install.sh --help
 #
-set -Eeuo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$SCRIPT_DIR"
 
 # shellcheck source=scripts/lib.sh
 source "$SCRIPT_DIR/scripts/lib.sh"
@@ -99,14 +106,34 @@ STEPS=(
   80-verify
 )
 
-CONFIG_FILE="$REPO_DIR/deploy.env"
+CONFIG_FILE="${CONFIG_FILE:-$REPO_DIR/deploy.env}"
 ASSUME_YES="no"
 FORCE="no"
 ONLY=""
 DO_UNINSTALL="no"
 
 usage() {
-  sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+  cat <<'EOF'
+install.sh — one-command deployer for a stealth AdGuard Home DNS gateway:
+public DoH + DoT only, hidden admin UI behind a secret path, decoy front site.
+
+Usage:
+  sudo ./install.sh                      # interactive, reads/creates deploy.env
+  sudo ./install.sh --config my.env      # use a specific config file
+  sudo DOMAIN=dns.example.com EMAIL=me@example.com ADMIN_PASS=secret ./install.sh --yes
+  sudo ./install.sh --force              # re-run all steps even if already done
+  sudo ./install.sh --only 70-caddyfile  # run a single step
+  sudo ./install.sh --uninstall          # tear everything down
+  sudo ./install.sh --help
+
+Options:
+  -c, --config FILE   Config file to read/write (default: $REPO_DIR/deploy.env)
+  -y, --yes           Assume yes / non-interactive where possible
+  -f, --force         Re-run steps even if already marked done
+      --only STEP     Run only the named step (e.g. 70-caddyfile)
+      --uninstall     Tear everything down
+  -h, --help          Show this help
+EOF
   exit 0
 }
 
@@ -126,6 +153,14 @@ while [ $# -gt 0 ]; do
 done
 export ASSUME_YES FORCE
 
+if [ -n "$ONLY" ]; then
+  _only_ok="no"
+  for _s in "${STEPS[@]}"; do
+    if [ "$_s" = "$ONLY" ]; then _only_ok="yes"; break; fi
+  done
+  [ "$_only_ok" = "yes" ] || die "Unknown step: $ONLY (valid: ${STEPS[*]})"
+fi
+
 require_root
 mkdir -p "$STATE_DIR"
 touch "$LOG_FILE" 2>/dev/null || LOG_FILE=/dev/null
@@ -143,9 +178,10 @@ touch "$LOG_FILE" 2>/dev/null || LOG_FILE=/dev/null
 : "${SSH_PORT:=}"
 : "${EXTRA_ALLOW:=}"
 : "${SKIP_FIREWALL:=no}"
+: "${VPN_FORWARDING:=no}"
 : "${DO_UPGRADE:=no}"
 : "${ENABLE_DEFAULT_FILTERS:=yes}"
-: "${DECOY_URL:=https://raw.githubusercontent.com/Liafanx/MTProxyL/refs/heads/main/templates_html/filemanager.html}"
+: "${DECOY_URL:=}"
 : "${ADGUARD_UPSTREAMS:=}"
 : "${ADGUARD_BOOTSTRAP:=}"
 : "${ADGUARD_FALLBACK:=}"
@@ -163,7 +199,7 @@ if [ "$DO_UNINSTALL" != "yes" ]; then
 
   # If there is no interactive tty, refuse to silently hang on prompts.
   if [ ! -r /dev/tty ] && [ "$ASSUME_YES" != "yes" ]; then
-    die "No interactive terminal detected after preflight. Re-run with \
+    die "No interactive terminal detected; cannot collect configuration. Re-run with \
          DOMAIN=... EMAIL=... ADMIN_PASS=... ./install.sh --yes  (or provide deploy.env)."
   fi
 
@@ -178,35 +214,44 @@ if [ "$DO_UNINSTALL" != "yes" ]; then
   ask ADMIN_USER "AdGuard admin username" "admin"
   ask_secret ADMIN_PASS "AdGuard admin password"
 
-  # Persist the config (without clobbering an existing file's extra keys).
-  if [ ! -f "$CONFIG_FILE" ] || ! grep -q '^DOMAIN=' "$CONFIG_FILE" 2>/dev/null; then
-    umask 077
-    {
-      echo "# AdGuard stealth-DNS deploy config — generated $(date '+%F %T')"
-      echo "# Keep this file private: it contains the admin password."
-      printf 'DOMAIN=%q\n' "$DOMAIN"
-      printf 'EMAIL=%q\n' "$EMAIL"
-      printf 'SECRET_PATH=%q\n' "$SECRET_PATH"
-      printf 'ADMIN_USER=%q\n' "$ADMIN_USER"
-      printf 'ADMIN_PASS=%q\n' "$ADMIN_PASS"
-      printf 'TIMEZONE=%q\n' "$TIMEZONE"
-      printf 'SSH_PORT=%q\n' "$SSH_PORT"
-      printf 'EXTRA_ALLOW=%q\n' "$EXTRA_ALLOW"
-      printf 'SKIP_FIREWALL=%q\n' "$SKIP_FIREWALL"
-      printf 'DO_UPGRADE=%q\n' "$DO_UPGRADE"
-      printf 'ENABLE_DEFAULT_FILTERS=%q\n' "$ENABLE_DEFAULT_FILTERS"
-      printf 'DECOY_URL=%q\n' "$DECOY_URL"
-      printf 'ADGUARD_UPSTREAMS=%q\n' "$ADGUARD_UPSTREAMS"
-      printf 'ADGUARD_BOOTSTRAP=%q\n' "$ADGUARD_BOOTSTRAP"
-      printf 'ADGUARD_FALLBACK=%q\n' "$ADGUARD_FALLBACK"
-    } >"$CONFIG_FILE"
-    chmod 600 "$CONFIG_FILE"
-    ok "Wrote $CONFIG_FILE (mode 600)"
+  # Persist the config on every run (merge: keep unknown keys from an existing file).
+  _known_keys='DOMAIN|EMAIL|SECRET_PATH|ADMIN_USER|ADMIN_PASS|TIMEZONE|SSH_PORT|EXTRA_ALLOW|SKIP_FIREWALL|VPN_FORWARDING|DO_UPGRADE|ENABLE_DEFAULT_FILTERS|DECOY_URL|ADGUARD_UPSTREAMS|ADGUARD_BOOTSTRAP|ADGUARD_FALLBACK'
+  _extra=""
+  if [ -f "$CONFIG_FILE" ]; then
+    _extra="$(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$CONFIG_FILE" 2>/dev/null \
+      | grep -Ev "^(${_known_keys})=" 2>/dev/null || true)"
   fi
+  umask 077
+  {
+    echo "# AdGuard stealth-DNS deploy config — generated $(date '+%F %T')"
+    echo "# Keep this file private: it contains the admin password."
+    printf 'DOMAIN=%q\n' "$DOMAIN"
+    printf 'EMAIL=%q\n' "$EMAIL"
+    printf 'SECRET_PATH=%q\n' "$SECRET_PATH"
+    printf 'ADMIN_USER=%q\n' "$ADMIN_USER"
+    printf 'ADMIN_PASS=%q\n' "$ADMIN_PASS"
+    printf 'TIMEZONE=%q\n' "$TIMEZONE"
+    printf 'SSH_PORT=%q\n' "$SSH_PORT"
+    printf 'EXTRA_ALLOW=%q\n' "$EXTRA_ALLOW"
+    printf 'SKIP_FIREWALL=%q\n' "$SKIP_FIREWALL"
+    printf 'VPN_FORWARDING=%q\n' "$VPN_FORWARDING"
+    printf 'DO_UPGRADE=%q\n' "$DO_UPGRADE"
+    printf 'ENABLE_DEFAULT_FILTERS=%q\n' "$ENABLE_DEFAULT_FILTERS"
+    printf 'DECOY_URL=%q\n' "$DECOY_URL"
+    printf 'ADGUARD_UPSTREAMS=%q\n' "$ADGUARD_UPSTREAMS"
+    printf 'ADGUARD_BOOTSTRAP=%q\n' "$ADGUARD_BOOTSTRAP"
+    printf 'ADGUARD_FALLBACK=%q\n' "$ADGUARD_FALLBACK"
+    if [ -n "$_extra" ]; then
+      printf '# Preserved extra keys from existing config:\n'
+      printf '%s\n' "$_extra"
+    fi
+  } >"$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE"
+  ok "Wrote $CONFIG_FILE (mode 600)"
 fi
 
 export DOMAIN EMAIL SECRET_PATH ADMIN_USER ADMIN_PASS TIMEZONE SSH_PORT \
-       EXTRA_ALLOW SKIP_FIREWALL DO_UPGRADE ENABLE_DEFAULT_FILTERS DECOY_URL \
+       EXTRA_ALLOW SKIP_FIREWALL VPN_FORWARDING DO_UPGRADE ENABLE_DEFAULT_FILTERS DECOY_URL \
        ADGUARD_UPSTREAMS ADGUARD_BOOTSTRAP ADGUARD_FALLBACK \
        REPO_DIR SCRIPT_DIR STATE_DIR LOG_FILE
 
@@ -245,7 +290,9 @@ for step in "${STEPS[@]}"; do
   fi
   hdr "Step $step"
   # shellcheck disable=SC1090
-  source "$SCRIPT_DIR/scripts/$step.sh"
+  if ! source "$SCRIPT_DIR/scripts/$step.sh"; then
+    die "Step $step failed. Fix the issue above and re-run (use --force to redo)."
+  fi
   mark_done "$step"
 done
 

@@ -35,12 +35,24 @@ if [ -n "${EXTRA_ALLOW:-}" ]; then
   done
 fi
 
-# Keep VPN forwarding working if the box routes traffic.
-if [ -f /etc/default/ufw ]; then
-  if ! grep -q '^DEFAULT_FORWARD_POLICY="ACCEPT"' /etc/default/ufw; then
-    warn "Setting DEFAULT_FORWARD_POLICY=ACCEPT (needed if this host routes a VPN)."
-    sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+# VPN forwarding is OPT-IN (default: no). Only touch /etc/default/ufw when the
+# operator explicitly sets VPN_FORWARDING=yes.
+if [ "${VPN_FORWARDING:-no}" = "yes" ]; then
+  if [ ! -f /etc/default/ufw ]; then
+    die "VPN_FORWARDING=yes but /etc/default/ufw is missing; cannot enable forwarding."
   fi
+  if grep -q '^DEFAULT_FORWARD_POLICY="ACCEPT"' /etc/default/ufw; then
+    ok "DEFAULT_FORWARD_POLICY is already ACCEPT."
+  else
+    warn "VPN_FORWARDING=yes — setting DEFAULT_FORWARD_POLICY=ACCEPT (needed to route VPN traffic)."
+    sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+    if ! grep -q '^DEFAULT_FORWARD_POLICY="ACCEPT"' /etc/default/ufw; then
+      die "Failed to set DEFAULT_FORWARD_POLICY in /etc/default/ufw (expected line not found). Fix it manually or unset VPN_FORWARDING."
+    fi
+    ok "DEFAULT_FORWARD_POLICY=ACCEPT set."
+  fi
+else
+  log "VPN_FORWARDING=no (default) — leaving DEFAULT_FORWARD_POLICY unchanged."
 fi
 
 ufw --force enable || die "Failed to enable ufw. Check /etc/default/ufw and run 'ufw --force enable' manually to see the error."

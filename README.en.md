@@ -51,15 +51,23 @@ sudo ./install.sh
 | 30-caddy | install Caddy, stop for the port-80 ACME challenge |
 | 40-cert | certbot (standalone) + shared cert + deploy hook |
 | 50-adguard | AdGuard Home from the official installer + patched config |
-| 60-decoy | fetch the decoy HTML (vendored fallback included) |
+| 60-decoy | install the decoy HTML (vendored copy by default; fetch only if `DECOY_URL` is set) |
 | 70-caddyfile | generate + validate + start the Caddy vhost |
 | 80-verify | smoke tests (DoH, decoy, secret redirect, DoT cert, listeners) |
 
 The installer asks 4 questions interactively (domain, email, admin username,
 admin password — the secret path is generated for you) and saves the answers
-to `deploy.env` (mode `0600`, **keep it private**). Resume / re-run: every
-step is skipped if already done; `--force` redoes everything; `--only 50-adguard`
-runs a single step; `--uninstall` tears everything down.
+to `deploy.env` (mode `0600`, **keep it private**). Where that file lives depends
+on how you launched the installer:
+
+- **one-liner (`curl … | sudo bash`)** — `/etc/adguard-deploy/deploy.env`. The
+  bootstrap runs from a throwaway `/tmp` directory, so it persists the config at
+  a stable path; that is what lets re-runs keep the *same* secret admin path.
+- **git clone (`sudo ./install.sh`)** — `deploy.env` next to `install.sh`.
+
+Resume / re-run: every step is skipped if already done; `--force` redoes
+everything; `--only 50-adguard` runs a single step (an unknown step name is
+rejected up front); `--uninstall` tears everything down.
 
 **At the end**, the installer prints:
 ```
@@ -111,7 +119,7 @@ sudo ./install.sh --uninstall          # tear everything down
 
 Configuration can also be supplied via environment variables (highest priority):
 `DOMAIN`, `EMAIL`, `SECRET_PATH`, `ADMIN_USER`, `ADMIN_PASS`, `TIMEZONE`,
-`SSH_PORT`, `EXTRA_ALLOW`, `SKIP_FIREWALL`, `DO_UPGRADE`,
+`SSH_PORT`, `EXTRA_ALLOW`, `SKIP_FIREWALL`, `VPN_FORWARDING`, `DO_UPGRADE`,
 `ENABLE_DEFAULT_FILTERS`, `DECOY_URL`, `ADGUARD_UPSTREAMS`,
 `ADGUARD_BOOTSTRAP`, `ADGUARD_FALLBACK`.
 
@@ -130,13 +138,23 @@ disabled; DoT is public on `:853`.
 ## Important caveats
 
 - **Secret path is the whole obscurity layer** — pick a long, unguessable value
-  (the installer generates 16 hex chars by default) and never publish it.
+  (the installer generates a 16-byte / 32-hex-char path by default) and never
+  publish it.
 - **Do not run `certbot renew --dry-run`** with the deploy hook installed: the
   hook would copy a *staging* certificate into place. Disable the hook first.
 - **UFW blocks everything else by default** — add VPN/app ports via the
   `EXTRA_ALLOW` env var (e.g. `EXTRA_ALLOW="51820/udp 64672/udp"`).
+- **VPN forwarding is opt-in.** The firewall step leaves
+  `/etc/default/ufw`'s `DEFAULT_FORWARD_POLICY` untouched unless you set
+  `VPN_FORWARDING=yes` (only needed if this box actually routes VPN traffic).
+- **`SKIP_FIREWALL=yes` is hazardous on an internet-facing box.** Before step
+  `50-adguard` patches its config, AdGuard's first-run setup wizard can briefly
+  listen on `0.0.0.0:3000`; keep the firewall on (or otherwise block `:3000`)
+  until that step finishes.
 - On AdGuard Home ~v0.107.x, **`--check-config` can hang and lock `:3000`**
   (so the `50-adguard` step avoids it; configs are validated structurally).
+- The decoy page is the copy **vendored in this repo** by default; set
+  `DECOY_URL` if you want to fetch a different page instead.
 - The decoy form is client-side only — it never sends credentials anywhere.
 
 ## Roll back
@@ -144,6 +162,15 @@ disabled; DoT is public on `:853`.
 Backups created during install stay on the box:
 `/root/AdGuardHome.yaml.bak.<timestamp>`. Re-apply one manually, or run
 `sudo ./install.sh --uninstall`.
+
+`--uninstall` removes AdGuard Home, Caddy and certbot (packages), `/var/www/fake`,
+`/etc/ssl/adguard`, the deploy hook and the AdGuard unit, the Caddy apt
+repo/keyring, `deploy.env` (both `repo/deploy.env` and
+`/etc/adguard-deploy/deploy.env`), `/var/log/adguard-deploy.log`, and the
+idempotency state. It deliberately leaves behind the Let's Encrypt live
+certificate (`certbot delete --cert-name <domain>` removes it), your UFW rules
+(`ufw reset` clears them — never on a remote box without console access), and the
+DNS A/AAAA record still pointing at this server.
 
 ## Full documentation
 
@@ -155,7 +182,8 @@ Backups created during install stay on the box:
 
 - AdGuard binds the admin/DoH on `127.0.0.1:3000` **only**; DoT is public on `:853`; plain DNS and DoQ are off.
 - AdGuard runs as root (so it can bind `:853`). Change if you know what you're doing.
-- The secret admin path is the obscurity layer — pick a long, unguessable value (the installer generates one by default) and never publish it.
+- The secret admin path is the obscurity layer — pick a long, unguessable value (the installer generates a 16-byte / 32-hex-char path by default) and never publish it.
+- The admin password is hashed by `htpasswd` reading it from **stdin** — it is never passed in process `argv` and only lives in the mode-`600` `deploy.env`.
 - **Do not run `certbot renew --dry-run`** with the deploy hook installed — the hook would copy a staging certificate into place.
 - On AdGuard Home ~v0.107.x, **`--check-config` can hang and lock `:3000`** — the installer script deliberately avoids it.
 

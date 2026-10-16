@@ -1,5 +1,5 @@
 {
-	email __DOMAIN__
+	email __EMAIL__
 }
 
 __DOMAIN__ {

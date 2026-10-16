@@ -15,12 +15,12 @@ else
   systemctl stop caddy 2>/dev/null || true
   certbot certonly --standalone \
     --pre-hook  "systemctl stop caddy || true" \
-    --post-hook "systemctl start caddy || true" \
+    --post-hook "if [ -f /etc/caddy/Caddyfile ]; then systemctl start caddy || true; fi" \
     -d "$DOMAIN" \
     -m "$EMAIL" \
     --agree-tos --no-eff-email --non-interactive
   if [ ! -s "$CERT_LIVE/fullchain.pem" ]; then
-    die "certbot did not issue a certificate for $DOMAIN.\n  Likely causes: DNS record for $DOMAIN is absent/wrong, or port 80 is closed (check BOTH UFW and the cloud-provider firewall).\n  Test: curl -I https://$DOMAIN  from another machine.\n  Logs: journalctl -u caddy --since '5min ago' --no-pager | tail -30"
+    die "certbot did not issue a certificate for $DOMAIN."$'\n'"  Likely causes: DNS record for $DOMAIN is absent/wrong, or port 80 is closed (check BOTH UFW and the cloud-provider firewall)."$'\n'"  Test: curl -I https://$DOMAIN  from another machine."$'\n'"  Logs: journalctl -u caddy --since '5min ago' --no-pager | tail -30"
   fi
   ok "Certificate issued."
 fi

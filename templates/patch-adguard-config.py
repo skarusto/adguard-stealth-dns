@@ -9,6 +9,8 @@ migration is triggered. Values come from environment variables (see below).
 Env vars (all optional; unset ones are left untouched):
   ADG_HTTP_ADDRESS        e.g. "127.0.0.1:3000"
   ADG_SERVE_PLAIN_DNS     "true" | "false"
+  ADG_DOH_ENABLED         "true" | "false" (http.doh.enabled)
+  ADG_DOH_INSECURE_ENABLED "true" | "false" (http.doh.insecure_enabled)
   ADG_TLS_ENABLED         "true" | "false"
   ADG_TLS_SERVER_NAME     hostname
   ADG_TLS_CERT            path to fullchain.pem
@@ -40,6 +42,19 @@ PATH = sys.argv[1] if len(sys.argv) > 1 else "/opt/AdGuardHome/AdGuardHome.yaml"
 with open(PATH, "r", encoding="utf-8") as fh:
     cfg = yaml.safe_load(fh) or {}
 
+# --- schema_version guard -------------------------------------------------
+# AdGuard's own schema_version must be present and must be left untouched.
+# Writing a config with a missing/lower version triggers a migration on the
+# next start, which can re-nest bootstrap_dns and silently drop keys such as
+# http.doh.insecure_enabled. Refuse to touch a config we cannot pin.
+if "schema_version" not in cfg:
+    sys.stderr.write(
+        "refusing to patch %s: no schema_version key present.\n"
+        "  Let AdGuard generate its config first, then re-run this script.\n" % PATH
+    )
+    sys.exit(2)
+SCHEMA_VERSION = cfg["schema_version"]
+
 
 def env(name):
     v = os.environ.get(name)
@@ -69,10 +84,13 @@ def lines(name):
 http = cfg.setdefault("http", {})
 if (addr := env("ADG_HTTP_ADDRESS")):
     http["address"] = addr
+# Behind a TLS-terminating reverse proxy AdGuard must accept plain-HTTP DoH,
+# but only force these when the caller explicitly asks (unset = leave as-is).
 doh = http.setdefault("doh", {})
-# Behind a TLS-terminating reverse proxy AdGuard must accept plain-HTTP DoH.
-doh["enabled"] = True
-doh["insecure_enabled"] = True
+if (v := as_bool("ADG_DOH_ENABLED")) is not None:
+    doh["enabled"] = v
+if (v := as_bool("ADG_DOH_INSECURE_ENABLED")) is not None:
+    doh["insecure_enabled"] = v
 
 # --- dns ------------------------------------------------------------------
 dns = cfg.setdefault("dns", {})
@@ -155,6 +173,10 @@ if src and os.path.isfile(src):
                        "safe_browsing", "parental", "rewrites", "blocked_services"])
     # Deliberately NOT imported: users, tls, http.address, dns.bind_hosts,
     # dns.port, dns.serve_plain_dns, schema_version.
+
+# Preserve schema_version exactly (never let a rewrite drop or change it).
+if cfg.get("schema_version") != SCHEMA_VERSION:
+    cfg["schema_version"] = SCHEMA_VERSION
 
 with open(PATH, "w", encoding="utf-8") as fh:
     yaml.safe_dump(cfg, fh, sort_keys=False, allow_unicode=True, default_flow_style=False)

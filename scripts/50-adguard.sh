@@ -10,12 +10,20 @@ if [ -x "$AG_BIN" ]; then
   ok "AdGuard Home binary already present: $AG_BIN"
 else
   log "Installing AdGuard Home via the official installer..."
-  curl -s -S -L https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh \
+  curl -fsSL https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh \
     | sh -s -- -v
   if [ ! -x "$AG_BIN" ]; then
-     die "AdGuard Home binary not found after install at $AG_BIN.\n  Fix: verify internet access and re-run; check /tmp/opencode? or proxy.\n  Fallback: manually run the official installer from https://adguard.com/adguard-home.html"
+     die "AdGuard Home binary not found after install at $AG_BIN."$'\n'"  Fix: verify internet access and re-run (check proxy/DNS settings)."$'\n'"  Fallback: run the official installer from https://adguard.com/adguard-home.html"
   fi
   ok "AdGuard Home installed."
+fi
+
+# The official installer starts AdGuard with its first-run setup wizard on
+# :3000, reachable on all interfaces until we stop it below. With the firewall
+# skipped that window is exposed to the internet — warn loudly.
+if [ "${SKIP_FIREWALL:-no}" = "yes" ]; then
+  warn "SKIP_FIREWALL=yes: AdGuard's setup wizard may be briefly reachable on :3000 from the internet."
+  warn "If this host is internet-facing, firewall :3000 now or stop AdGuard until the config is patched."
 fi
 
 # --- 2. Stop it so we can edit the config --------------------------------
@@ -25,14 +33,13 @@ sleep 1
 
 # --- 3. Make sure a config exists; let AdGuard generate a default if not --
 if [ ! -s "$AG_CFG" ]; then
-    log "No config found; starting AdGuard to generate a default config (max 25s)."
   log "No config present; starting AdGuard briefly so it writes a default config..."
   ( cd "$AG_DIR" && "$AG_BIN" -w "$AG_DIR" --no-check-update >/tmp/adguard-firstrun.log 2>&1 & )
   for _ in $(seq 1 25); do [ -s "$AG_CFG" ] && break; sleep 1; done
   pkill -f "$AG_BIN" 2>/dev/null || true
   sleep 1
   if [ ! -s "$AG_CFG" ]; then
-     die "AdGuard did not generate $AG_CFG (see /tmp/adguard-firstrun.log).\n  Likely: binary failed to start (port collision / permission).\n  Try running: /opt/AdGuardHome/AdGuardHome -c /opt/AdGuardHome/AdGuardHome.yaml -w /opt/AdGuardHome --no-check-update"
+     die "AdGuard did not generate $AG_CFG (see /tmp/adguard-firstrun.log)."$'\n'"  Likely: binary failed to start (port collision / permission)."$'\n'"  Try running: /opt/AdGuardHome/AdGuardHome -c /opt/AdGuardHome/AdGuardHome.yaml -w /opt/AdGuardHome --no-check-update"
   fi
   ok "Default config generated."
 fi
@@ -44,13 +51,15 @@ ok "Installed unit $AG_UNIT"
 
 # --- 5. Generate the admin bcrypt hash -----------------------------------
 require_cmd htpasswd
-ADG_ADMIN_HASH="$(htpasswd -nbBC 14 "" "$ADMIN_PASS" | sed 's/^[^:]*://' | tr -d '\n')"
+ADG_ADMIN_HASH="$(printf '%s\n' "$ADMIN_PASS" | htpasswd -nBC 14 -i "" | sed 's/^[^:]*://' | tr -d '\n')"
 [ -n "$ADG_ADMIN_HASH" ] || die "Failed to generate a bcrypt hash for the admin password."
 
 # --- 6. Patch the config --------------------------------------------------
 log "Patching AdGuard config..."
 ADG_HTTP_ADDRESS="127.0.0.1:3000" \
 ADG_SERVE_PLAIN_DNS="false" \
+ADG_DOH_ENABLED="true" \
+ADG_DOH_INSECURE_ENABLED="true" \
 ADG_TLS_ENABLED="true" \
 ADG_TLS_SERVER_NAME="$DOMAIN" \
 ADG_TLS_CERT="/etc/ssl/adguard/fullchain.pem" \
@@ -78,7 +87,7 @@ if wait_service_active AdGuardHome 30; then
 else
   err "AdGuardHome failed to start. Recent logs:"
   journalctl -u AdGuardHome -n 30 --no-pager >&2 || true
-  die "AdGuard Home did not start.\n  Inspect: systemctl status AdGuardHome && journalctl -u AdGuardHome -n 40 --no-pager\n  Confirm /opt/AdGuardHome/AdGuardHome.yaml is valid YAML and schema_version is current."
+  die "AdGuard Home did not start."$'\n'"  Inspect: systemctl status AdGuardHome && journalctl -u AdGuardHome -n 40 --no-pager"$'\n'"  Confirm /opt/AdGuardHome/AdGuardHome.yaml is valid YAML and schema_version is current."
 fi
 
 # --- 8. Sanity check listeners -------------------------------------------

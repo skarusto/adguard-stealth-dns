@@ -51,7 +51,7 @@
 Сгенерируйте секретный путь (сделайте это один раз и сохраните):
 
 ```bash
-SECRET_PATH="/$(openssl rand -hex 8)"   # -> /a1b2c3d4e5f60718
+SECRET_PATH="/$(openssl rand -hex 16)"   # -> /a1b2c3d4e5f60718a1b2c3d4e5f60718  (16 байт / 32 hex)
 echo "$SECRET_PATH"
 ```
 
@@ -60,7 +60,7 @@ echo "$SECRET_PATH"
 ```bash
 DOMAIN="dns.example.com"
 EMAIL="you@example.com"
-SECRET_PATH="/a1b2c3d4e5f60718"
+SECRET_PATH="/a1b2c3d4e5f60718a1b2c3d4e5f60718"
 ADMIN_USER="admin"
 ADMIN_PASS="CHANGE_ME_TO_SOMETHING_STRONG"
 ```
@@ -198,10 +198,9 @@ ufw allow 853/tcp         # DoT
 # ufw allow 64672/udp     # AmneziaWG
 # ufw allow 58472/tcp     # какой-то ваш сервис
 
-# Если сервер маршрутизирует VPN, сохраните форвардинг:
-grep -q '^DEFAULT_FORWARD_POLICY="ACCEPT"' /etc/default/ufw \
-  && echo "forward уже ACCEPT" \
-  || sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+# ТОЛЬКО если сервер реально маршрутизирует VPN, сохраните форвардинг.
+# Установщик делает это опцией (VPN_FORWARDING=yes) и по умолчанию файл не трогает:
+# sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
 
 ufw --force enable
 ufw status verbose
@@ -428,8 +427,9 @@ systemctl enable AdGuardHome
 
 ```bash
 install -d -m 755 /var/www/fake
-curl -fsSL -o /var/www/fake/index.html \
-  https://raw.githubusercontent.com/Liafanx/MTProxyL/refs/heads/main/templates_html/filemanager.html
+# Установщик по умолчанию использует копию из репозитория; задайте DECOY_URL,
+# чтобы скачать другую страницу. Ручной эквивалент (из клона репозитория):
+cp /root/adguard-stealth-dns/assets/index.html /var/www/fake/index.html
 chmod 644 /var/www/fake/index.html
 ```
 
@@ -449,7 +449,7 @@ wc -c /var/www/fake/index.html    # ожидайте десятки КБ
 
 ```caddyfile
 {
-	email your@email.example     # используется, если Caddy когда-либо делает ACME; здесь безвредно
+	email you@example.com        # контакт для ACME; установщик подставляет сюда EMAIL
 }
 
 # (Опционально) ничего особенного не доверяем; Caddy сам передаёт X-Forwarded-*.

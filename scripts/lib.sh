@@ -57,6 +57,9 @@ render_template() {
   printf '%s\n' "$content" >"$out"
 }
 
+# Escape a value for use in a sed s/// replacement (delimiter, backslash, ampersand).
+sed_escape() { printf '%s' "$1" | sed -e 's/[\/&\\]/\\&/g'; }
+
 toml_escape() { printf '%s' "$1" | sed -e 's/[\/&]/\\&/g'; }
 
 # Non-interactive-safe prompt. Reads from /dev/tty when available.
@@ -133,12 +136,12 @@ port_in_use() { # port_in_use <port>  -> 0 if something listens
 }
 
 wait_service_active() { # wait_service_active <unit> <seconds>
-  local unit="$1" secs="${2:-30}" i
-  for i in $(seq 1 "$secs"); do
+  local unit="$1" secs="${2:-30}"
+  for _ in $(seq 1 "$secs"); do
     systemctl is-active --quiet "$unit" && return 0
     sleep 1
   done
   return 1
 }
 
-random_secret_path() { printf '/%s' "$(openssl rand -hex 8)"; }
+random_secret_path() { printf '/%s' "$(openssl rand -hex 16)"; }

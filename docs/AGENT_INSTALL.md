@@ -37,15 +37,16 @@ The installer is fully scriptable, but **only** under these rules:
 | `DOMAIN` | **yes** | — | Must already have an A record pointing at the VPS public IP, propagated. |
 | `EMAIL` | **yes** | — | Let's Encrypt contact. Must be a real, monitored address. |
 | `ADMIN_PASS` | **yes** | — | AdGuard admin password. **Secret.** Never echo, never commit, never log. |
-| `SECRET_PATH` | recommended | `/<16 hex>` (auto) | The obscurity layer. If you let it be auto-generated you must capture it from the run output. Setting it yourself makes verification deterministic. |
+| `SECRET_PATH` | recommended | `/<32 hex>` (auto) | The obscurity layer. If you let it be auto-generated you must capture it from the run output. Setting it yourself makes verification deterministic. |
 | `ADMIN_USER` | no | `admin` | |
 | `TIMEZONE` | no | `UTC` | e.g. `Europe/Berlin`. |
 | `SSH_PORT` | no | auto-detected | Set it explicitly if `sshd` runs on a non-standard port and detection could fail — this value is what UFW will allow. |
 | `EXTRA_ALLOW` | no | — | Space-separated UFW specs, e.g. `"51820/udp 64672/udp"`. |
-| `SKIP_FIREWALL` | no | `no` | Set `yes` only if a cloud provider already enforces the firewall and you do not want UFW. |
+| `SKIP_FIREWALL` | no | `no` | Set `yes` only if a cloud provider already enforces the firewall and you do not want UFW. **Hazard:** with UFW skipped, AdGuard's first-run wizard can briefly listen on `0.0.0.0:3000` before step `50-adguard` patches the config — keep `:3000` blocked until that step finishes. |
+| `VPN_FORWARDING` | no | `no` | Opt-in. `yes` sets `DEFAULT_FORWARD_POLICY=ACCEPT` in `/etc/default/ufw` — only needed if this box routes VPN traffic. Without it the installer leaves that file untouched. |
 | `DO_UPGRADE` | no | `no` | `yes` runs a full `apt-get upgrade` (slower, less predictable). |
 | `ENABLE_DEFAULT_FILTERS` | no | `yes` | |
-| `DECOY_URL` | no | upstream template | Fallback to repo-vendored `assets/index.html` automatically. |
+| `DECOY_URL` | no | vendored copy | The decoy page is taken from the repo-vendored `assets/index.html` by default. Set this URL to fetch a different page instead; the vendored copy is still the fallback if the download fails. |
 | `ADGUARD_UPSTREAMS`, `ADGUARD_BOOTSTRAP`, `ADGUARD_FALLBACK` | no | AdGuard defaults | |
 
 **Collecting `ADMIN_PASS` from the human:** request it in a secure channel; do not paste it into
@@ -126,8 +127,12 @@ see §5 for why `deploy.env` is safer than a command line.
 
 Note the bootstrap behaviour: when `install.sh` runs from a directory that does not contain
 `scripts/lib.sh` (i.e. the one-liner), it downloads the whole repo tree into a temporary
-directory under `/tmp` and re-executes itself there. Every path in this manual assumes the repo
-copy at `/root/adguard-stealth-dns`.
+directory under `/tmp` and re-executes itself there. Because that directory is throwaway, the
+bootstrap pins the config to **`/etc/adguard-deploy/deploy.env`** (via `CONFIG_FILE`) so a re-run
+reuses the same `SECRET_PATH`/password instead of minting a new secret path. A **git clone**
+instead uses `deploy.env` next to `install.sh`. Every path in this manual assumes the repo copy
+at `/root/adguard-stealth-dns` with its own `deploy.env`; if you use the one-liner path, remember
+the config lives at `/etc/adguard-deploy/deploy.env`.
 
 ---
 
@@ -161,6 +166,11 @@ The installer chmods it `600` if it writes it itself; when you create it, ensure
 ```bash
 ssh -T root@$VPS 'chmod 600 /root/adguard-stealth-dns/deploy.env'
 ```
+
+The installer itself never puts the admin password in `argv`: it pipes it to
+`htpasswd` on **stdin** (`printf '%s\n' "$ADMIN_PASS" | htpasswd -nBC 14 -i ""`) when
+generating the bcrypt hash, so the plaintext is not visible via `ps`. Keep it that way —
+never pass secrets as arguments on the command line.
 
 ---
 
@@ -197,7 +207,7 @@ sudo ./install.sh                      # interactive (needs a TTY — not for ag
 sudo ./install.sh --yes                # non-interactive; requires deploy.env or env vars
 sudo ./install.sh --config /path/x.env # specific config file
 sudo ./install.sh --force              # redo every step (destructive on a live box)
-sudo ./install.sh --only 50-adguard    # run a single step
+sudo ./install.sh --only 50-adguard    # run a single step (unknown names are rejected)
 sudo ./install.sh --uninstall          # tear everything down (with --yes: NO confirmation!)
 sudo ./install.sh --help
 ```
@@ -238,11 +248,11 @@ Idempotency state: `/var/lib/adguard-deploy/done.<step>`. Log: `/var/log/adguard
 |---|---|---|---|
 | `00-preflight` | OS, internet, DNS, free ports | no internet, domain does not resolve | DNS not pointing at *this* IP (with `--yes`: continues), port in use by another process |
 | `10-base` | apt packages, timezone | apt failure | timezone not settable; upgrade skipped |
-| `20-firewall` | UFW deny-incoming, allow SSH/80/443/853 | `ufw` missing, `ufw enable` failed | prints all listening sockets; skipped if `SKIP_FIREWALL=yes` |
+| `20-firewall` | UFW deny-incoming, allow SSH/80/443/853 | `ufw` missing, `ufw enable` failed | prints all listening sockets; skipped if `SKIP_FIREWALL=yes`; sets `DEFAULT_FORWARD_POLICY=ACCEPT` only if `VPN_FORWARDING=yes` |
 | `30-caddy` | install Caddy, **stop it** (frees :80) | — | already installed |
 | `40-cert` | certbot standalone + shared copy + deploy hook | certbot did not issue, shared cert missing | cert already exists (skips issuance) |
 | `50-adguard` | official installer, config patch, unit, restart | binary/config missing, service did not start | `:3000` bound beyond localhost |
-| `60-decoy` | fetch decoy HTML (vendored fallback) | empty index file | download failed → fallback used |
+| `60-decoy` | install the decoy HTML (vendored copy by default; fetch only if `DECOY_URL` set) | empty index file | download failed → vendored fallback used |
 | `70-caddyfile` | render + `caddy validate` + start | validation failed, caddy not active | — |
 | `80-verify` | smoke tests | **never fails the run** | prints `FAIL :` lines |
 
@@ -330,12 +340,15 @@ ssh -T root@$VPS 'cd /root/adguard-stealth-dns && setsid ./install.sh --uninstal
 ```
 
 > ⚠️ **`--uninstall --yes` skips the confirmation prompt** and removes Caddy, certbot, AdGuard
-> Home, `/var/www/fake`, `/etc/ssl/adguard`, the deploy hook and state. Always get explicit
+> Home, `/var/www/fake`, `/etc/ssl/adguard`, the deploy hook and the AdGuard unit, the Caddy apt
+> repo/keyring, `deploy.env` (both `repo/deploy.env` and `/etc/adguard-deploy/deploy.env`), the
+> log (`/var/log/adguard-deploy.log`), and the idempotency state. Always get explicit
 > human approval first — this is irreversible from the agent's side.
 
 Left behind deliberately: Let's Encrypt live certs (`certbot delete --cert-name <domain>` to
-remove) and UFW rules (`ufw reset` to clear — never do this to a remote box without console
-access). Per-step config backups live at `/root/AdGuardHome.yaml.bak.<timestamp>`.
+remove), UFW rules (`ufw reset` to clear — never do this to a remote box without console
+access), and the DNS A/AAAA records still pointing at the server. Per-step config backups live at
+`/root/AdGuardHome.yaml.bak.<timestamp>`.
 
 ---
 
@@ -356,6 +369,9 @@ access). Per-step config backups live at `/root/AdGuardHome.yaml.bak.<timestamp>
    prompt forever.
 8. **Never** run `--force`, `--uninstall`, or repo-deletion actions without human approval.
 9. **Never** assume exit 0 == healthy (§7).
+10. **Never** set `SKIP_FIREWALL=yes` on an internet-facing box without otherwise blocking
+    `:3000` — AdGuard's first-run setup wizard is briefly reachable on `0.0.0.0:3000` until step
+    `50-adguard` patches the config.
 
 ---
 
