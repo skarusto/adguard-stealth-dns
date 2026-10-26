@@ -34,9 +34,11 @@ fi
 
 # --- Phase 3: domain resolution (bounded to 15s) -------------------------
 echo "[preflight 3/4] Resolving '$DOMAIN' (bounded to 15s)..." >&2
-RESOLVED="$(timeout 15 getent ahostsv4 "$DOMAIN" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+if ! RESOLVED="$(timeout 15 getent ahostsv4 "$DOMAIN" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' | sed 's/ $//')"; then
+  die "DNS lookup for '$DOMAIN' failed or timed out after 15 seconds."$'\n'"      Check the domain's A record and DNS resolver/network, then retry."
+fi
 if [ -z "$RESOLVED" ]; then
-  die "Domain '$DOMAIN' does not resolve (no A/AAAA record)."$'\n'"      Fix: create an A record for $DOMAIN -> <this server's public IP> at your registrar/DNS."$'\n'"      Wait for propagation (up to 5 min), then re-run the one-liner."
+  die "Domain '$DOMAIN' does not resolve (lookup timed out or returned no A record)."$'\n'"      Fix: create an A record for $DOMAIN -> <this server's public IP> at your registrar/DNS; check DNS/network access."$'\n'"      Wait for propagation (up to 5 min), then retry."
 fi
 echo "[preflight 3/4] '$DOMAIN' -> $RESOLVED" >&2
 log "Public IP      : ${PUBLIC_IP:-unknown}"

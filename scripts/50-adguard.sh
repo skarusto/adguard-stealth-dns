@@ -4,45 +4,59 @@ AG_DIR=/opt/AdGuardHome
 AG_BIN="$AG_DIR/AdGuardHome"
 AG_CFG="$AG_DIR/AdGuardHome.yaml"
 AG_UNIT=/etc/systemd/system/AdGuardHome.service
+AG_VERSION=v0.107.79 # Reproducible release pin; verified against upstream release archive.
 
-# --- 1. Install the binary (official installer) --------------------------
+# --- 1. Install the official release archive without running its installer -
 if [ -x "$AG_BIN" ]; then
   ok "AdGuard Home binary already present: $AG_BIN"
 else
-  log "Installing AdGuard Home via the official installer..."
-  curl -fsSL https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh \
-    | sh -s -- -v
+  case "$(uname -m)" in
+    x86_64|amd64) AG_ARCH=amd64 ;;
+    aarch64|arm64) AG_ARCH=arm64 ;;
+    i386|i686) AG_ARCH=386 ;;
+    armv6l|armv6) AG_ARCH=armv6 ;;
+    armv7l|armv7) AG_ARCH=armv7 ;;
+    *) die "Unsupported AdGuard Home architecture: $(uname -m)" ;;
+  esac
+  AG_TMP="$(mktemp -d)" || die "Could not create private AdGuard download directory."
+  chmod 700 "$AG_TMP"
+  trap 'rm -rf "$AG_TMP"' EXIT
+  log "Downloading official AdGuard Home $AG_VERSION release archive..."
+  curl -fsSL --connect-timeout 15 --max-time 180 --retry 2 --retry-delay 2 --retry-max-time 360 \
+    "https://github.com/AdguardTeam/AdGuardHome/releases/download/$AG_VERSION/AdGuardHome_linux_${AG_ARCH}.tar.gz" \
+    -o "$AG_TMP/adguard.tar.gz" || die "Could not download AdGuard Home release archive."
+  # GitHub's release archive stores members with a leading ./ component.
+  # Extract into the private staging directory rather than naming members.
+  tar -xzf "$AG_TMP/adguard.tar.gz" -C "$AG_TMP" || die "Could not unpack AdGuard Home release archive."
+  install -d -o root -g root -m 700 "$AG_DIR"
+  install -o root -g root -m 755 "$AG_TMP/AdGuardHome/AdGuardHome" "$AG_BIN"
+  rm -rf "$AG_TMP"
+  trap - EXIT
   if [ ! -x "$AG_BIN" ]; then
-     die "AdGuard Home binary not found after install at $AG_BIN."$'\n'"  Fix: verify internet access and re-run (check proxy/DNS settings)."$'\n'"  Fallback: run the official installer from https://adguard.com/adguard-home.html"
+      die "AdGuard Home binary not found after archive extraction at $AG_BIN."$'\n'"  Verify the official release archive contains AdGuardHome/AdGuardHome and retry; do not use the auto-starting installer."
   fi
   ok "AdGuard Home installed."
 fi
 
-# The official installer starts AdGuard with its first-run setup wizard on
-# :3000, reachable on all interfaces until we stop it below. With the firewall
-# skipped that window is exposed to the internet — warn loudly.
-if [ "${SKIP_FIREWALL:-no}" = "yes" ]; then
-  warn "SKIP_FIREWALL=yes: AdGuard's setup wizard may be briefly reachable on :3000 from the internet."
-  warn "If this host is internet-facing, firewall :3000 now or stop AdGuard until the config is patched."
-fi
-
-# --- 2. Stop it so we can edit the config --------------------------------
+# Stop only the managed unit. Prepare private workdir permissions before start.
 systemctl stop AdGuardHome 2>/dev/null || true
-pkill -f "$AG_BIN" 2>/dev/null || true
-sleep 1
+install -d -o root -g root -m 700 "$AG_DIR"
 
-# --- 3. Make sure a config exists; let AdGuard generate a default if not --
-if [ ! -s "$AG_CFG" ]; then
-  log "No config present; starting AdGuard briefly so it writes a default config..."
-  ( cd "$AG_DIR" && "$AG_BIN" -w "$AG_DIR" --no-check-update >/tmp/adguard-firstrun.log 2>&1 & )
-  for _ in $(seq 1 25); do [ -s "$AG_CFG" ] && break; sleep 1; done
-  pkill -f "$AG_BIN" 2>/dev/null || true
-  sleep 1
-  if [ ! -s "$AG_CFG" ]; then
-     die "AdGuard did not generate $AG_CFG (see /tmp/adguard-firstrun.log)."$'\n'"  Likely: binary failed to start (port collision / permission)."$'\n'"  Try running: /opt/AdGuardHome/AdGuardHome -c /opt/AdGuardHome/AdGuardHome.yaml -w /opt/AdGuardHome --no-check-update"
-  fi
-  ok "Default config generated."
+# --- 2. Complete first-run wizard locally when no config exists ------------
+if [ -e "$AG_CFG" ] && ! python3 -c 'import sys,yaml; c=yaml.safe_load(open(sys.argv[1])) or {}; sys.exit(0 if "schema_version" in c else 1)' "$AG_CFG" 2>/dev/null; then
+  die "Existing AdGuard config is invalid or has no schema_version; refusing to replace it: $AG_CFG"
 fi
+if [ ! -e "$AG_CFG" ]; then
+  log "No config present; configuring AdGuard's first-run wizard on loopback..."
+  if ! ADG_INIT_USERNAME="$ADMIN_USER" ADG_INIT_PASSWORD="$ADMIN_PASS" \
+      python3 "$REPO_DIR/templates/initialize-adguard.py" \
+      --binary "$AG_BIN" --work-dir "$AG_DIR" --config "$AG_CFG"; then
+    die "AdGuard first-run wizard did not become ready or rejected its configure request. See $AG_DIR/initialize.log (root-only). Re-run after addressing the wizard/configuration failure."
+  fi
+  ok "First-run configuration generated."
+fi
+chown root:root "$AG_DIR"
+chmod 700 "$AG_DIR"
 
 # --- 4. Deterministic systemd unit ---------------------------------------
 install -m 644 "$REPO_DIR/templates/AdGuardHome.service" "$AG_UNIT"
@@ -57,6 +71,7 @@ ADG_ADMIN_HASH="$(printf '%s\n' "$ADMIN_PASS" | htpasswd -nBC 14 -i "" | sed 's/
 # --- 6. Patch the config --------------------------------------------------
 log "Patching AdGuard config..."
 ADG_HTTP_ADDRESS="127.0.0.1:3000" \
+ADG_BIND_HOSTS="0.0.0.0" \
 ADG_SERVE_PLAIN_DNS="false" \
 ADG_DOH_ENABLED="true" \
 ADG_DOH_INSECURE_ENABLED="true" \

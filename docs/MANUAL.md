@@ -108,7 +108,7 @@ Key design rules:
 
 ## 2. Prerequisites
 
-- A VPS running **Debian 12/13** or **Ubuntu 22.04/24.04**, x86_64 or arm64.
+- A VPS running **Debian 12/13** or **Ubuntu 22.04/24.04**. The pinned AdGuard release supports amd64, arm64, armv7, armv6 and 386 (with common `x86_64`/`aarch64` aliases).
 - **Root** (or sudo) access.
 - A **public IPv4** address.
 - A **hostname** (`DOMAIN`) whose A (and optionally AAAA) record points to the VPS. If your home/server IP changes, use a dynamic-DNS provider (DuckDNS, `linkpc.net`, `afraid.org`, etc.) or a proper domain.
@@ -163,6 +163,8 @@ apt -y install curl wget gnupg ca-certificates apt-transport-https \
 timedatectl set-timezone UTC
 ```
 
+`apt-utils` is optional; the debconf “delaying package configuration” notice on a minimal image is normally harmless if apt completes successfully.
+
 Confirm DNS resolution works on the box itself (needed for installs):
 
 ```bash
@@ -204,6 +206,7 @@ ufw allow 853/tcp         # DoT
 # sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
 
 ufw --force enable
+systemctl enable --now ufw
 ufw status verbose
 ```
 
@@ -218,9 +221,11 @@ Expected result: `443/tcp`, `853/tcp`, `80/tcp`, `22/tcp` ALLOW inbound; everyth
 ```bash
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
   | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+chmod 644 /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
   | tee /etc/apt/sources.list.d/caddy-stable.list
+chmod 644 /etc/apt/sources.list.d/caddy-stable.list
 
 apt update
 apt -y install caddy
@@ -240,6 +245,7 @@ We use **certbot** (not Caddy's built-in ACME) because the same cert/key files m
 
 ```bash
 apt -y install certbot
+systemctl enable --now certbot.timer
 ```
 
 ### 7.1 Create the shared cert directory
@@ -255,7 +261,7 @@ Port 80 must be free; Caddy is stopped and AdGuard is not installed yet, so we'r
 ```bash
 certbot certonly --standalone \
   --pre-hook  "systemctl stop caddy || true" \
-  --post-hook "systemctl start caddy || true" \
+  --post-hook "/bin/sh -c 'if [ -s /etc/caddy/Caddyfile ] && grep -q /etc/ssl/adguard/fullchain.pem /etc/caddy/Caddyfile && [ -s /etc/ssl/adguard/fullchain.pem ] && [ -s /etc/ssl/adguard/privkey.pem ]; then systemctl restart caddy || true; fi'" \
   -d "$DOMAIN" \
   -m "$EMAIL" \
   --agree-tos --no-eff-email --non-interactive
@@ -311,21 +317,24 @@ You should see `fullchain.pem` (root:root, 644) and `privkey.pem` (root:caddy, 6
 
 ## 8. Install AdGuard Home
 
-Use the official installer:
+Fresh unattended installs pin the official **v0.107.79** archive for reproducibility.
+Existing binaries are reused, not silently upgraded. Changing the fresh-install release
+pin requires retesting the setup API and config patching against that binary.
 
-```bash
-curl -s -S -L https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh | sh -s -- -v
-```
+For the recommended bootstrap, use this repository's installer (`sudo ./install.sh`) for step `50-adguard`; it downloads the official AdGuard Home release archive and configures first run safely. **Do not use AdGuard's `scripts/install.sh` curl-pipe installer here**: it auto-starts the default wizard before this deployment's protections are applied.
 
-This downloads AdGuard Home to `/opt/AdGuardHome`, installs a systemd unit (`AdGuardHome.service`), and starts the first-run **setup wizard** on `:3000` (listening on all interfaces temporarily).
+The repository installer creates `/opt/AdGuardHome` as root-only mode `0700`, then starts the downloaded binary with its web listener on a loopback ephemeral port. It completes setup through the local API using a different temporary web port and high, non-privileged loopback DNS port numbers. The binary still must run as root during initialization; these are unprivileged port numbers, not an unprivileged process. The helper stops the tracked process and patches the generated config for the final listeners. The schema version is preserved from the actual binary; an existing config bypasses first-run initialization. Final state keeps admin/DoH at `127.0.0.1:3000`, plain DNS disabled, and DoT public on `:853` using public `dns.bind_hosts`.
 
-### 8.1 Run the setup wizard once (to set the admin account)
+If you deliberately build the rest of this manual without the project installer, install the official release binary/archive yourself and complete the first-run wizard only through a protected SSH tunnel. Never run the upstream shell installer or expose the setup wizard publicly. For most deployments, use the project installer for this complex initialization step.
+
+### 8.1 Manual-only wizard setup (not used by the repository installer)
 
 Do this over an SSH tunnel so `:3000` is never exposed publicly:
 
 ```bash
 # from YOUR machine:
-ssh -L 3000:127.0.0.1:3000 root@<VPS_IP>
+VPS_IP=YOUR_VPS_IP # replace with the server's address
+ssh -L 3000:127.0.0.1:3000 "root@$VPS_IP"
 # then open http://127.0.0.1:3000 in your browser
 ```
 
@@ -355,7 +364,7 @@ http:
 
 dns:
   bind_hosts:
-    - 0.0.0.0                    # where AdGuard would bind plain DNS (unused, see below)
+    - 0.0.0.0                    # public bind needed for DoT; plain DNS remains disabled below
   port: 53
   serve_plain_dns: false         # (3) NO public plain DNS on :53
   # ... your upstream_dns / bootstrap_dns / fallback_dns / etc. stay here ...
@@ -370,12 +379,16 @@ tls:
   port_dns_over_tls: 853         # (6) public DoT lives here
   port_dns_over_quic: 0          # (7) DoQ OFF
 
-schema_version: 34               # (8) PIN THIS -- see the warning below
+# Keep the existing schema_version generated by this binary; do not change it.
 ```
+
+Keep the `schema_version` generated by this exact AdGuard binary; do not copy a version number from this example or guess it. Restrict `/opt/AdGuardHome` to root mode `700`, and the YAML to root mode `600`.
 
 Then apply ownership and restart:
 
 ```bash
+chown root:root /opt/AdGuardHome
+chmod 700 /opt/AdGuardHome
 chown root:root /opt/AdGuardHome/AdGuardHome.yaml
 chmod 600 /opt/AdGuardHome/AdGuardHome.yaml
 systemctl start AdGuardHome
@@ -386,7 +399,7 @@ ss -tlnp | grep AdGuardHome      # expect 127.0.0.1:3000 and *:853 ONLY
 
 ### Why each numbered line matters
 
-1. **`http.address: 127.0.0.1:3000`** — if you leave the wizard's default (`0.0.0.0:3000`), the admin UI is reachable at `http://<VPS_IP>:3000` (and via the domain if anything proxies it), defeating the "hidden admin" design.
+1. **`http.address: 127.0.0.1:3000`** — for a manual wizard setup, do not leave a public web binding such as `0.0.0.0:3000`; it would expose the admin UI directly. The repository installer starts its setup listeners on loopback.
 2. **`http.doh.insecure_enabled: true`** — AdGuard's DoH endpoint normally requires HTTPS itself. Behind Caddy we terminate TLS upstream, so AdGuard must be told to accept plain HTTP DoH. **This is the single most common cause of a broken `/dns-query`.**
 3. **`dns.serve_plain_dns: false`** — no plaintext DNS exposed.
 4. **cert paths** — point at the shared copy managed by the certbot deploy hook.
@@ -395,7 +408,7 @@ ss -tlnp | grep AdGuardHome      # expect 127.0.0.1:3000 and *:853 ONLY
 7. **`tls.port_dns_over_quic: 0`** — DoQ off (not requested; keep the attack surface minimal).
 8. **`schema_version`** — see below.
 
-> **Schema-version landmine.** If you let AdGuard perform a config migration (by writing a config whose `schema_version` is *lower* than the binary expects, then restarting), it will rewrite the YAML and can (a) re-nest `bootstrap_dns` in a way that then fails to parse, and (b) drop newer keys such as `http.doh.insecure_enabled`. On a config taken from an *older* AdGuard, set `schema_version` to the value the **current** binary uses (find it with `AdGuardHome --version` / by running the wizard once and reading the generated file) and keep it pinned. The reference deployment pins **34**.
+> **Schema-version landmine.** If you let AdGuard perform a config migration (by writing a config whose `schema_version` is *lower* than the binary expects, then restarting), it can rewrite the YAML and drop newer keys such as `http.doh.insecure_enabled`. Preserve the version emitted by the **current binary**; do not copy a fixed version from another release or hand-edit it. The project installer patches the generated file without changing that version.
 
 ### The systemd unit
 
@@ -460,42 +473,40 @@ DOMAIN {
 	# Use the shared certbot-issued certificate (also used by AdGuard for DoT)
 	tls /etc/ssl/adguard/fullchain.pem /etc/ssl/adguard/privkey.pem
 
-	# ---- 1. Public DoH endpoint (RFC 8484), GET + POST -> AdGuard ----
-	handle /dns-query {
-		reverse_proxy 127.0.0.1:3000
-	}
+	# Keep explicit route order: otherwise Caddy can sort the slash wildcard first.
+	route {
+		# ---- 1. Public DoH endpoint (RFC 8484), GET + POST -> AdGuard ----
+		handle /dns-query {
+			reverse_proxy 127.0.0.1:3000
+		}
 
-	# ---- 2. Bare secret path -> append the trailing slash ----
-	handle SECRET_PATH {
-		redir SECRET_PATH/ 302
-	}
+		# ---- 2. Bare and slash secret paths -> prefixed login page ----
+		handle SECRET_PATH {
+			redir * SECRET_PATH/login.html 302
+		}
+		handle SECRET_PATH/ {
+			redir * SECRET_PATH/login.html 302
+		}
 
-	# ---- 3. Secret admin UI -> AdGuard, prefix stripped from the upstream,
-	#         and root-absolute redirects re-prefixed on the way back ----
-	handle SECRET_PATH/* {
-		uri strip_prefix SECRET_PATH
-		header >Location ^/(.*)$ SECRET_PATH/$1
-		reverse_proxy 127.0.0.1:3000
-	}
+		# ---- 3. Secret admin UI -> AdGuard, prefix stripped upstream;
+		#         root-absolute redirects are re-prefixed on the way back ----
+		handle SECRET_PATH/* {
+			uri strip_prefix SECRET_PATH
+			header >Location ^/(.*)$ SECRET_PATH/$1
+			reverse_proxy 127.0.0.1:3000
+		}
 
-	# ---- 4. Everything else -> the decoy site ----
-	handle {
-		root * /var/www/fake
-		try_files {path} /index.html
-		file_server
+		# ---- 4. Everything else -> the decoy site ----
+		handle {
+			root * /var/www/fake
+			try_files {path} /index.html
+			file_server
+		}
 	}
 }
 ```
 
-For the reference example, the two `SECRET_PATH` lines become `/REDACTED_SECRET_PATH`. Concretely, handler 3 looks like:
-
-```caddyfile
-	handle /REDACTED_SECRET_PATH/* {
-		uri strip_prefix /REDACTED_SECRET_PATH
-		header >Location ^/(.*)$ /REDACTED_SECRET_PATH/$1
-		reverse_proxy 127.0.0.1:3000
-	}
-```
+Keep the explicit `route` wrapper: it preserves the order from [`templates/Caddyfile`](../templates/Caddyfile), so exact bare/slash redirects are selected before the secret-path wildcard. Substitute `SECRET_PATH` with your private path; do not publish it.
 
 Validate and start:
 
@@ -560,12 +571,17 @@ curl -s  "https://$DOMAIN/" | grep -io '<title>[^<]*</title>' | head -1
 # 3) A random path also returns the decoy (catch-all). Expect 200.
 curl -sI "https://$DOMAIN/some/random/path" | head -1
 
-# 4) Secret admin path. Expect 302 (redirect into the prefixed login page).
-curl -sI "https://$DOMAIN$SECRET_PATH/" | head -1
+# 4) Both forms must return 302 and the exact prefixed login Location; login is 200.
+for path in "$SECRET_PATH" "$SECRET_PATH/"; do
+  result=$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' "https://$DOMAIN$path")
+  printf '%s -> %s\n' "$path" "$result"
+  [ "$result" = "302 https://$DOMAIN$SECRET_PATH/login.html" ] || exit 1
+done
+curl -sI "https://$DOMAIN$SECRET_PATH/login.html" | head -1 # expect 200
 
-# 5) DoT. Expect the certificate subject/name to match DOMAIN and verify OK.
-echo | openssl s_client -connect $DOMAIN:853 -servername $DOMAIN 2>/dev/null \
-  | openssl x509 -noout -subject -issuer
+# 5) DoT: require a trusted chain and matching hostname, not just a printed CN.
+timeout 15 openssl s_client -brief -verify_return_error -verify_hostname "$DOMAIN" \
+  -connect "$DOMAIN:853" -servername "$DOMAIN" </dev/null
 ```
 
 For a real end-to-end resolve check, use the appendix script in §17.1 and confirm:
@@ -591,7 +607,7 @@ import sys, yaml
 # new (target) config and old (source) config
 NEW = '/opt/AdGuardHome/AdGuardHome.yaml'
 OLD = '/path/to/old/AdGuardHome.yaml'
-OUT = '/tmp/AdGuardHome.merged.yaml'
+OUT = '/root/AdGuardHome.merged.yaml'
 
 new = yaml.safe_load(open(NEW))
 old = yaml.safe_load(open(OLD))
@@ -635,7 +651,7 @@ cp -a /opt/AdGuardHome/AdGuardHome.yaml /root/AdGuardHome.yaml.bak.$(date +%s)
 systemctl stop AdGuardHome
 # wait until inactive (AdGuard can take several seconds to flush state)
 for i in $(seq 1 60); do systemctl is-active --quiet AdGuardHome || break; sleep 1; done
-cp -a /tmp/AdGuardHome.merged.yaml /opt/AdGuardHome/AdGuardHome.yaml
+cp -a /root/AdGuardHome.merged.yaml /opt/AdGuardHome/AdGuardHome.yaml
 chmod 600 /opt/AdGuardHome/AdGuardHome.yaml
 systemctl start AdGuardHome
 sleep 5
@@ -654,6 +670,8 @@ systemctl is-active AdGuardHome && echo OK || { echo "FAILED -> rolling back";
 ---
 
 ## 14. Gotchas and landmines
+
+For installer-specific failures and benign notices, see the focused [troubleshooting guide](TROUBLESHOOTING.md).
 
 These are the exact traps encountered while building the reference deployment. Read them before deploying.
 
@@ -800,14 +818,22 @@ ss -tlnp | grep -E ':(80|443|853|3000)\b'                     # 3000 must be 127
 ### B.3 Admin API check (single login, reused cookie)
 
 ```bash
-SP="/a1b2c3d4e5f60718"; H="https://$DOMAIN"
-curl -s -c /tmp/cj -o /dev/null -w 'login: %{http_code}\n' \
-  -X POST "$H$SP/control/login" -H 'content-type: application/json' \
-  -d '{"name":"admin","password":"YOURPASS"}'
-curl -s -b /tmp/cj "$H$SP/control/status" | head -c 200; echo
-curl -s -b /tmp/cj "$H$SP/control/filtering/status" | head -c 300; echo
-rm -f /tmp/cj
+SP="/YOUR_SECRET"; H="https://$DOMAIN"  # actual private path; do not publish it
+umask 077; CJ=$(mktemp /root/adguard-cookie.XXXXXX)
+read -r -p 'Admin username: ' ADMIN_USER
+read -r -s -p 'Admin password: ' ADMIN_PASS; printf '\n'
+export ADMIN_USER ADMIN_PASS
+python3 -c 'import json,os; print(json.dumps({"name":os.environ["ADMIN_USER"],"password":os.environ["ADMIN_PASS"]}))' \
+  | curl -s -c "$CJ" -o /dev/null -w 'login: %{http_code}\n' \
+    -X POST "$H$SP/control/login" -H 'content-type: application/json' --data-binary @-
+unset ADMIN_PASS
+curl -s -b "$CJ" "$H$SP/control/status" | head -c 200; echo
+curl -s -b "$CJ" "$H$SP/control/filtering/status" | head -c 300; echo
+rm -f "$CJ"
 ```
+
+Use this only in a private terminal, with shell tracing disabled. Credentials travel
+over stdin, not `curl` arguments. Honor HTTP 429/Retry-After; do not retry logins in a loop.
 
 ---
 
@@ -817,7 +843,7 @@ rm -f /tmp/cj
 
 ```bash
 systemctl stop AdGuardHome
-cp -a /root/AdGuardHome.yaml.bak.<timestamp> /opt/AdGuardHome/AdGuardHome.yaml
+cp -a /opt/AdGuardHome/AdGuardHome.yaml.bak.<timestamp> /opt/AdGuardHome/AdGuardHome.yaml
 systemctl start AdGuardHome
 ```
 

@@ -26,6 +26,7 @@ scripts/60-decoy.sh
 scripts/70-caddyfile.sh
 scripts/80-verify.sh
 scripts/90-uninstall.sh
+templates/initialize-adguard.py
 templates/Caddyfile
 templates/AdGuardHome.service
 templates/adguard-shared-cert.sh
@@ -33,8 +34,10 @@ templates/patch-adguard-config.py
 assets/index.html
 docs/MANUAL.md
 docs/MANUAL.ru.md
+docs/AGENT_INSTALL.md
+docs/TROUBLESHOOTING.md
 README.md
-README.ru.md
+README.en.md
 LICENSE"
   _files=""
   if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
@@ -163,7 +166,21 @@ fi
 
 require_root
 mkdir -p "$STATE_DIR"
-touch "$LOG_FILE" 2>/dev/null || LOG_FILE=/dev/null
+if [ -L "$LOG_FILE" ] || ! mkdir -p "$(dirname "$LOG_FILE")"; then
+  printf '!! Cannot secure deployment log %s as a root-only mode-600 file. Fix its path/permissions and retry.\n' "$LOG_FILE" >&2
+  exit 1
+fi
+if [ ! -e "$LOG_FILE" ]; then
+  ( umask 077; set -C; : >"$LOG_FILE" ) 2>/dev/null || {
+    printf '!! Cannot securely create deployment log %s. Fix its path/permissions and retry.\n' "$LOG_FILE" >&2
+    exit 1
+  }
+fi
+if [ -L "$LOG_FILE" ] || [ ! -f "$LOG_FILE" ] || ! chown root:root "$LOG_FILE" || ! chmod 600 "$LOG_FILE" \
+  || [ "$(stat -c '%a:%u' "$LOG_FILE" 2>/dev/null)" != "600:0" ]; then
+  printf '!! Cannot secure deployment log %s as a root-owned mode-600 regular file. Fix its path/ownership/permissions and retry.\n' "$LOG_FILE" >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Config: defaults <- deploy.env <- environment <- interactive prompts
@@ -195,6 +212,21 @@ if [ "$DO_UNINSTALL" != "yes" ]; then
     log "No config file found; I'll ask a few questions and save answers to $CONFIG_FILE."
   fi
 
+  # Resolve SSH_PORT in the parent: preflight runs in a child and its detected
+  # value cannot be inherited by the later firewall step or saved config.
+  if [ -z "$SSH_PORT" ]; then SSH_PORT="$(detect_ssh_port)"; fi
+  case "$SSH_PORT" in
+    ''|*[!0-9]*) die "Invalid SSH_PORT '$SSH_PORT' (expected a TCP port from 1 to 65535)." ;;
+  esac
+  [ "$SSH_PORT" -ge 1 ] && [ "$SSH_PORT" -le 65535 ] \
+    || die "Invalid SSH_PORT '$SSH_PORT' (expected a TCP port from 1 to 65535)."
+
+  if [ "$ASSUME_YES" = "yes" ]; then
+    [ -n "$DOMAIN" ] || die "Missing DOMAIN; provide DOMAIN=... (or set it in deploy.env)."
+    [ -n "$EMAIL" ] || die "Missing EMAIL; provide EMAIL=... (or set it in deploy.env)."
+    [ -n "$ADMIN_PASS" ] || die "Missing ADMIN_PASS; provide ADMIN_PASS=... (or set it in deploy.env)."
+  fi
+
   hdr "Configuration"
 
   # If there is no interactive tty, refuse to silently hang on prompts.
@@ -208,7 +240,7 @@ if [ "$DO_UNINSTALL" != "yes" ]; then
 
   if [ -z "$SECRET_PATH" ]; then
     SECRET_PATH="$(random_secret_path)"
-    log "Generated secret admin path: $SECRET_PATH"
+    log "Generated a secret admin path; it will be stored in the private config file."
   fi
 
   ask ADMIN_USER "AdGuard admin username" "admin"
@@ -221,6 +253,7 @@ if [ "$DO_UNINSTALL" != "yes" ]; then
     _extra="$(grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$CONFIG_FILE" 2>/dev/null \
       | grep -Ev "^(${_known_keys})=" 2>/dev/null || true)"
   fi
+  (
   umask 077
   {
     echo "# AdGuard stealth-DNS deploy config — generated $(date '+%F %T')"
@@ -246,6 +279,7 @@ if [ "$DO_UNINSTALL" != "yes" ]; then
       printf '%s\n' "$_extra"
     fi
   } >"$CONFIG_FILE"
+  )
   chmod 600 "$CONFIG_FILE"
   ok "Wrote $CONFIG_FILE (mode 600)"
 fi
@@ -277,7 +311,7 @@ fi
 hdr "AdGuard stealth DNS — deploy"
 log "Domain         : $DOMAIN"
 log "Email          : $EMAIL"
-log "Secret path    : $SECRET_PATH"
+log "Secret path    : stored privately in $CONFIG_FILE"
 log "Admin user     : $ADMIN_USER"
 log "Log file       : $LOG_FILE"
 echo
@@ -286,7 +320,7 @@ for step in "${STEPS[@]}"; do
   [ -n "$ONLY" ] && [ "$ONLY" != "$step" ] && continue
   # An explicit --only implies re-running that step even if already done.
   if [ -z "$ONLY" ] && step_skipped "$step"; then
-    ok "Skipping $step (already done; use --force to redo)"
+    ok "Skipping $step (already done; rerun normally to continue; no --force needed)"
     continue
   fi
   hdr "Step $step"
@@ -294,7 +328,7 @@ for step in "${STEPS[@]}"; do
   # 'if !' silently disables set -e inside it.
   # shellcheck disable=SC2086
   if ! bash -c 'set -Eeuo pipefail; source "$1/scripts/lib.sh"; source "$1/scripts/'"$step"'.sh"' _ "$SCRIPT_DIR"; then
-    die "Step $step failed. Fix the issue above and re-run (use --force to redo)."
+    die "Step $step failed. Fix the issue above and rerun normally to continue; no --force needed."
   fi
   mark_done "$step"
 done
@@ -302,7 +336,8 @@ done
 hdr "Done"
 ok "Deployment complete."
 echo
-log "Admin URL : https://$DOMAIN$SECRET_PATH/"
+printf '[%s] [INFO] Admin URL : https://%s%s/\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$DOMAIN" "$SECRET_PATH" >>"$LOG_FILE" 2>/dev/null || true
+log "Admin URL : private; see root-only log file $LOG_FILE"
 log "DoH URL   : https://$DOMAIN/dns-query"
 log "DoT host  : tls://$DOMAIN:853"
 echo

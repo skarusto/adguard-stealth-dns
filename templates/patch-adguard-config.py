@@ -9,6 +9,7 @@ migration is triggered. Values come from environment variables (see below).
 Env vars (all optional; unset ones are left untouched):
   ADG_HTTP_ADDRESS        e.g. "127.0.0.1:3000"
   ADG_SERVE_PLAIN_DNS     "true" | "false"
+  ADG_BIND_HOSTS          newline-separated DNS listener addresses
   ADG_DOH_ENABLED         "true" | "false" (http.doh.enabled)
   ADG_DOH_INSECURE_ENABLED "true" | "false" (http.doh.insecure_enabled)
   ADG_TLS_ENABLED         "true" | "false"
@@ -29,7 +30,10 @@ Also optionally merges functional settings from another config:
   ADG_MERGE_FROM          path to a source AdGuardHome.yaml
 """
 import os
+import shutil
 import sys
+import tempfile
+from datetime import datetime, timezone
 
 try:
     import yaml
@@ -96,6 +100,8 @@ if (v := as_bool("ADG_DOH_INSECURE_ENABLED")) is not None:
 dns = cfg.setdefault("dns", {})
 if (spd := as_bool("ADG_SERVE_PLAIN_DNS")) is not None:
     dns["serve_plain_dns"] = spd
+if (hosts := lines("ADG_BIND_HOSTS") or lines("ADG_DNS_BIND_HOSTS")) is not None:
+    dns["bind_hosts"] = hosts
 if (ups := lines("ADG_UPSTREAMS")) is not None:
     dns["upstream_dns"] = ups
 if (bs := lines("ADG_BOOTSTRAP")) is not None:
@@ -178,7 +184,31 @@ if src and os.path.isfile(src):
 if cfg.get("schema_version") != SCHEMA_VERSION:
     cfg["schema_version"] = SCHEMA_VERSION
 
-with open(PATH, "w", encoding="utf-8") as fh:
-    yaml.safe_dump(cfg, fh, sort_keys=False, allow_unicode=True, default_flow_style=False)
+directory = os.path.dirname(os.path.abspath(PATH))
+fd, staged_path = tempfile.mkstemp(prefix=".adguard-config-", dir=directory, text=True)
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(cfg, fh, sort_keys=False, allow_unicode=True, default_flow_style=False)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+    # Keep a root-only pre-change copy before atomically replacing the config.
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    backup = PATH + ".bak." + stamp
+    backup_fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with open(PATH, "rb") as source, os.fdopen(backup_fd, "wb") as target:
+        os.fchmod(target.fileno(), 0o600)
+        shutil.copyfileobj(source, target)
+        target.flush()
+        os.fsync(target.fileno())
+    os.replace(staged_path, PATH)
+    os.chmod(PATH, 0o600)
+except Exception:
+    try:
+        os.unlink(staged_path)
+    except FileNotFoundError:
+        pass
+    raise
 
 print("patched", PATH)

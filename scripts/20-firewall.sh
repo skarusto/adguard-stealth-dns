@@ -56,7 +56,12 @@ else
 fi
 
 ufw --force enable || die "Failed to enable ufw. Check /etc/default/ufw and run 'ufw --force enable' manually to see the error."
-systemctl enable ufw >/dev/null 2>&1 || true
+systemctl enable --now ufw >/dev/null 2>&1 || die "Failed to enable and start the ufw service. Check 'systemctl status ufw'."
+if ! ufw status | grep -q '^Status: active'; then
+  die "UFW did not report active after enabling; inspect 'ufw status verbose' and 'systemctl status ufw'."
+fi
+systemctl is-active --quiet ufw.service \
+  || die "UFW rules are active but ufw.service is not active. Check 'systemctl status ufw.service'."
 ufw status verbose | sed 's/^/    /' >&2
 
 ok "Firewall configured."

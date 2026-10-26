@@ -1,2 +1,4 @@
 docs/REVIEW-findings.md
 deploy.env
+__pycache__/
+*.pyc

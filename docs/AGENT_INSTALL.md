@@ -1,392 +1,236 @@
-# Agent installation manual — driving `adguard-stealth-dns` from an AI agent
+# Install via an AI agent (SSH runbook)
 
-**Audience:** autonomous coding agents (Codex, OpenCode, Claude Code, Aider, …) performing the
-installation *over SSH from a workstation onto a fresh Debian/Ubuntu VPS*.
+For Codex, OpenCode and other agents operating **from a workstation over SSH** onto a
+fresh Debian 12/13 or Ubuntu 22.04/24.04 VPS. Read this file before executing commands.
+See [MANUAL.md](MANUAL.md) for architecture and
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md) for installation errors and notices.
 
-**Style:** machine-oriented. Exact commands, explicit contracts, hard stops, verifiable exit
-conditions. For human-oriented explanation see [`MANUAL.md`](MANUAL.md) (architecture,
-step-by-step reasoning, landmines) or [`../README.en.md`](../README.en.md) (quick start).
+## 1. Collect inputs and approval
 
-**Repo:** `https://github.com/skarusto/adguard-stealth-dns`
+Collect the VPS address, verified SSH host-key fingerprint, SSH username/key/port,
+domain, Let's Encrypt email, admin username/password (at least 8 characters), and any additional ports that
+must remain accessible (`EXTRA_ALLOW`, e.g. `51820/udp 64672/udp`). Never request
+passwords in public chat or put them in process arguments, source control, or logs.
+The operator may instead prepare a private config file or approve password generation.
 
----
+Before changing the server, obtain approval to install packages, run third-party
+installers, configure services, accept Let's Encrypt's terms, and enable deny-by-default
+UFW. Preserve the actual SSH port and required VPN/app ports. Have provider-console
+access available. Do not reset an existing firewall or stop unrelated services.
 
-## 0. Contract summary (read this first)
+Stop if the target is wrong, privileges are insufficient, DNS is wrong, required ports
+are occupied by unrelated software, or preserving access is uncertain. DNS-provider
+changes require the operator's authorization; never assume provider credentials exist.
 
-You sit on a workstation with an SSH key to the VPS. The VPS is a **fresh Debian 12/13 or
-Ubuntu 22.04/24.04** box with a public IPv4 and a domain already pointed at it.
+## 2. Connect and inspect (no changes)
 
-The installer is fully scriptable, but **only** under these rules:
-
-1. Provide `DOMAIN`, `EMAIL`, `ADMIN_PASS` (and optionally `SECRET_PATH`) **before** running.
-   Either in a mode-`600` `deploy.env` next to `install.sh`, or as environment variables.
-   Without them it will either die or block on a prompt.
-2. Run with `--yes` **and** without a TTY (`ssh -T`, `</dev/null`, or `nohup`). A TTY plus a
-   missing variable = the script waits forever on `/dev/tty`.
-3. **Exit code 0 does not mean the deployment is healthy.** The final `80-verify` step reports
-   failures as warnings and still returns success. You must parse its output.
-4. Never run destructive or known-hazardous commands (§11).
-5. Stop and ask the human when §2 conditions are not met.
-
----
-
-## 1. Values you must collect before touching anything
-
-| Variable | Required | Default | Notes |
-|---|---|---|---|
-| `DOMAIN` | **yes** | — | Must already have an A record pointing at the VPS public IP, propagated. |
-| `EMAIL` | **yes** | — | Let's Encrypt contact. Must be a real, monitored address. |
-| `ADMIN_PASS` | **yes** | — | AdGuard admin password. **Secret.** Never echo, never commit, never log. |
-| `SECRET_PATH` | recommended | `/<32 hex>` (auto) | The obscurity layer. If you let it be auto-generated you must capture it from the run output. Setting it yourself makes verification deterministic. |
-| `ADMIN_USER` | no | `admin` | |
-| `TIMEZONE` | no | `UTC` | e.g. `Europe/Berlin`. |
-| `SSH_PORT` | no | auto-detected | Set it explicitly if `sshd` runs on a non-standard port and detection could fail — this value is what UFW will allow. |
-| `EXTRA_ALLOW` | no | — | Space-separated UFW specs, e.g. `"51820/udp 64672/udp"`. |
-| `SKIP_FIREWALL` | no | `no` | Set `yes` only if a cloud provider already enforces the firewall and you do not want UFW. **Hazard:** with UFW skipped, AdGuard's first-run wizard can briefly listen on `0.0.0.0:3000` before step `50-adguard` patches the config — keep `:3000` blocked until that step finishes. |
-| `VPN_FORWARDING` | no | `no` | Opt-in. `yes` sets `DEFAULT_FORWARD_POLICY=ACCEPT` in `/etc/default/ufw` — only needed if this box routes VPN traffic. Without it the installer leaves that file untouched. |
-| `DO_UPGRADE` | no | `no` | `yes` runs a full `apt-get upgrade` (slower, less predictable). |
-| `ENABLE_DEFAULT_FILTERS` | no | `yes` | |
-| `DECOY_URL` | no | vendored copy | The decoy page is taken from the repo-vendored `assets/index.html` by default. Set this URL to fetch a different page instead; the vendored copy is still the fallback if the download fails. |
-| `ADGUARD_UPSTREAMS`, `ADGUARD_BOOTSTRAP`, `ADGUARD_FALLBACK` | no | AdGuard defaults | |
-
-**Collecting `ADMIN_PASS` from the human:** request it in a secure channel; do not paste it into
-a chat transcript, a commit, or a command history. Preferred pattern: have the human provide it
-only as the content of a file you `scp`, or have them run the one command themselves. If you
-must handle it, keep it in memory and write it straight to a mode-`600` file on the server.
-
----
-
-## 2. Hard stops — ask the human before proceeding
-
-* DNS A record for `DOMAIN` does not resolve to the VPS public IP (or you cannot verify it).
-* The VPS is not Debian/Ubuntu, or not a fresh box (something already listens on 80/443/853).
-* `ADMIN_PASS` / `DOMAIN` / `EMAIL` are unavailable or were supplied over an insecure channel.
-* The box is a jump host / production box where other services run — UFW deny-by-default will cut
-  them off. Confirm `EXTRA_ALLOW` explicitly.
-* You would need to change SSH port rules or disable UFW to keep your session alive.
-* Any destructive action: `--force` on a live server, `--uninstall`, deleting certs or config.
-
----
-
-## 3. Establish an SSH session and sanity-check the target
-
-Use `-T` (no TTY) so nothing can block on a prompt, plus timeouts so you never hang forever:
+These examples use **Bash on the workstation** and root SSH access. For a non-root
+account, arrange authorized passwordless `sudo -n` and root-owned paths first; do not
+let sudo prompt invisibly. Verify the host fingerprint out of band and add the key to
+known_hosts before using `StrictHostKeyChecking=yes`.
 
 ```bash
-VPS=203.0.113.10          # your target
-SSH="ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new root@$VPS"
-$SSH 'id -u'                              # must print 0 (root). If not, prefix with sudo -i
+VPS=203.0.113.10                    # replace
+SSH_PORT=22                        # actual SSH server port, not an assumption
+DOMAIN=dns.example.com             # replace
+SSH=(ssh -T -p "$SSH_PORT" -o BatchMode=yes -o ConnectTimeout=10 \
+     -o StrictHostKeyChecking=yes "root@$VPS")
+SCP=(scp -P "$SSH_PORT" -o BatchMode=yes -o StrictHostKeyChecking=yes)
+"${SSH[@]}" 'id -u; cat /etc/os-release; ss -tlnp; ss -ulnp; command -v curl; command -v openssl; command -v tar; command -v git || true'
 ```
 
-Run this whole gate as one block (last argument = the domain under test); any non-zero exit
-means **stop**:
+Require root (`id -u` = 0), a supported OS, `curl`, `openssl`, and an IPv4 A record
+matching the VPS. Inspect DNS and outbound HTTPS with bounded commands:
 
 ```bash
-$SSH 'set -e
-  . /etc/os-release
-  case "$ID" in debian|ubuntu) echo "OS=$PRETTY_NAME";; *) echo "UNSUPPORTED_OS=$ID"; exit 1;; esac
-  curl -fsS --max-time 10 https://api.ipify.org >/dev/null || { echo "NO_INTERNET"; exit 1; }
-  IP=$(curl -fsS --max-time 8 https://api.ipify.org)
-  RES=$(getent ahostsv4 "$1" | awk "{print \$1}" | sort -u | tr "\n" " ")
-  echo "PUBLIC_IP=$IP"; echo "DOMAIN_RESOLVES_TO=$RES"
-  for p in 80 443 853; do ss -tlnH | grep -qE "[:.]$p\$" && echo "PORT_BUSY=$p"; done
-  command -v curl >/dev/null || { echo "NO_CURL"; exit 1; }
-' _ example.com
+"${SSH[@]}" "bash -s -- '$DOMAIN'" <<'REMOTE'
+set -euo pipefail
+domain=$1
+ip=$(curl -fsS --connect-timeout 5 --max-time 10 https://api.ipify.org)
+resolved=$(timeout 15 getent ahostsv4 "$domain" | awk '{print $1}' | sort -u)
+printf 'Public IPv4: %s\nA records:\n%s\n' "$ip" "$resolved"
+grep -qxF "$ip" <<<"$resolved" || { echo 'STOP: incorrect A record' >&2; exit 1; }
+for port in 80 443 853 3000 3001; do
+  listeners=$(ss -tlnH | awk -v p=":$port" '$4 ~ (p "$") {print}')
+  if [ -n "$listeners" ]; then
+    printf 'STOP: port %s occupied; inspect owner before proceeding\n' "$port" >&2
+    exit 1
+  fi
+done
+REMOTE
 ```
 
-Then, **from your own workstation**, verify reachability from outside (the installer cannot do
-this for itself):
+Validate the domain as a hostname before substituting it into remote commands (letters,
+digits, dots and hyphens only; no quotes or shell syntax). On a **resume**, expected
+Caddy/AdGuard listeners are not a reason to kill processes: inspect their ownership.
+
+Confirm provider firewall/security-group rules allow TCP 80/443/853 and the real SSH
+port, and block public 53/3000/3001. If AAAA is published, it must reach this server too;
+otherwise correct/remove it with approval. A refused HTTP connection before any HTTP
+server exists is normal: `curl` status `000` does **not** prove the firewall blocks 80.
+External HTTP-01 reachability is established during ACME validation (or with an approved
+temporary listener), not by probing an empty socket.
+
+## 3. Obtain the code (Git is optional)
+
+If Git exists, clone into `/root/adguard-stealth-dns`. Do not overwrite an existing
+checkout or private `deploy.env`; inspect and reuse it on resume.
 
 ```bash
-curl -sI -o /dev/null -w '%{http_code}\n' http://example.com/    # expect 000/404/301; 000 = 80 closed inbound
+"${SSH[@]}" 'git clone https://github.com/skarusto/adguard-stealth-dns.git /root/adguard-stealth-dns'
 ```
 
-If port 80 is not reachable from the internet, Let's Encrypt **will** fail at step `40-cert`.
-
----
-
-## 4. Get the code onto the server
-
-Prefer copying a known-good tree you have already read, rather than piping a remote script into
-a shell:
+If `git: command not found`, use an archive; no Git package installation is necessary:
 
 ```bash
-VPS=203.0.113.10
-rsync -a --exclude .git ./ root@$VPS:/root/adguard-stealth-dns/
-# or: ssh root@$VPS 'git clone --depth 1 https://github.com/skarusto/adguard-stealth-dns.git /root/adguard-stealth-dns'
-```
-
-One-liner alternative (unaudited remote code — review `install.sh` first if you care):
-
-```bash
-ssh -T root@$VPS 'curl -fsSL https://raw.githubusercontent.com/skarusto/adguard-stealth-dns/main/install.sh | sudo bash'
-```
-
-The one-liner form is fine **only** when all required variables are exported on the remote side;
-see §5 for why `deploy.env` is safer than a command line.
-
-Note the bootstrap behaviour: when `install.sh` runs from a directory that does not contain
-`scripts/lib.sh` (i.e. the one-liner), it downloads the whole repo tree into a temporary
-directory under `/tmp` and re-executes itself there. Because that directory is throwaway, the
-bootstrap pins the config to **`/etc/adguard-deploy/deploy.env`** (via `CONFIG_FILE`) so a re-run
-reuses the same `SECRET_PATH`/password instead of minting a new secret path. A **git clone**
-instead uses `deploy.env` next to `install.sh`. Every path in this manual assumes the repo copy
-at `/root/adguard-stealth-dns` with its own `deploy.env`; if you use the one-liner path, remember
-the config lives at `/etc/adguard-deploy/deploy.env`.
-
----
-
-## 5. Create the config on the server (do not pass secrets in argv)
-
-Secrets on a command line are visible to **every user on the box** via `ps`. Write a config file
-instead.
-
-```bash
-# On your workstation:
+"${SSH[@]}" 'bash -s' <<'REMOTE'
+set -euo pipefail
 umask 077
-cat > /tmp/deploy.env <<'EOF'
-DOMAIN=example.com
-EMAIL=admin@example.com
-SECRET_PATH=/3f9a1c27be05d4aa
+test ! -e /root/adguard-stealth-dns
+archive=$(mktemp /root/adguard-source.XXXXXX.tar.gz)
+trap 'rm -f "$archive"' EXIT
+curl -fSL --connect-timeout 10 --max-time 120 \
+  https://github.com/skarusto/adguard-stealth-dns/archive/refs/heads/main.tar.gz -o "$archive"
+sha256sum "$archive"               # provenance record, not independent authenticity proof
+install -d -m 700 /root/adguard-stealth-dns
+tar -xzf "$archive" --strip-components=1 -C /root/adguard-stealth-dns
+REMOTE
+```
+
+Prefer an operator-approved commit SHA instead of mutable `main` for reproducibility
+(archive URL: `/archive/<commit-sha>.tar.gz`). Review downloaded scripts before running.
+Never compare to a hash from another installation unless it is the exact same archive.
+
+## 4. Prepare trusted private configuration
+
+Have the operator supply a **shell-syntax** config file with mode 600. It is sourced
+as code, not parsed as inert dotenv data; use only a trusted file. Required keys:
+
+```text
+DOMAIN=dns.example.com
+EMAIL=operator@example.com
 ADMIN_USER=admin
-ADMIN_PASS=REPLACE_ME
-TIMEZONE=UTC
-SSH_PORT=22
-EXTRA_ALLOW=
+ADMIN_PASS=<securely supplied password, shell-quoted>
+SSH_PORT=<actual SSH server port>
+EXTRA_ALLOW='<space-separated required port/protocol entries>'
 SKIP_FIREWALL=no
+VPN_FORWARDING=no
 DO_UPGRADE=no
-EOF
-scp -p /tmp/deploy.env root@$VPS:/root/adguard-stealth-dns/deploy.env
-shred -u /tmp/deploy.env 2>/dev/null || rm -f /tmp/deploy.env
 ```
 
-`deploy.env` is plain `KEY=value` shell syntax — quote any value containing spaces or `$`.
-The installer chmods it `600` if it writes it itself; when you create it, ensure `600` yourself:
+These are placeholders, **not** an executable config. Generate shell-safe assignments
+with Bash `printf '%s=%q\n' KEY "$value"` without printing them into an agent transcript.
+An unset `SECRET_PATH` is generated as `/` plus 32 random hex characters and persisted;
+never reuse an example secret. `TIMEZONE` defaults to UTC. Optional
+`ADGUARD_UPSTREAMS`, `ADGUARD_BOOTSTRAP`, `ADGUARD_FALLBACK` take newline-separated entries.
+`ENABLE_DEFAULT_FILTERS=yes` enables the stock filter. The decoy is vendored by default;
+`DECOY_URL` optionally overrides it. `VPN_FORWARDING=yes` is opt-in for VPN routers.
+
+Transfer the private file with SCP (use the same port/key as SSH), then verify metadata
+only. Do not print its contents:
 
 ```bash
-ssh -T root@$VPS 'chmod 600 /root/adguard-stealth-dns/deploy.env'
+# CONFIG_LOCAL points to the operator's existing mode-600 file.
+"${SCP[@]}" "$CONFIG_LOCAL" "root@$VPS:/root/adguard-stealth-dns/deploy.env"
+"${SSH[@]}" 'chown root:root /root/adguard-stealth-dns/deploy.env; chmod 600 /root/adguard-stealth-dns/deploy.env; stat -c "%U %a %n" /root/adguard-stealth-dns/deploy.env'
 ```
 
-The installer itself never puts the admin password in `argv`: it pipes it to
-`htpasswd` on **stdin** (`printf '%s\n' "$ADMIN_PASS" | htpasswd -nBC 14 -i ""`) when
-generating the bcrypt hash, so the plaintext is not visible via `ps`. Keep it that way —
-never pass secrets as arguments on the command line.
+Keep workstation copies only with authorization. On Windows, use numeric SID notation
+such as `*S-1-...` with `icacls`, not localized group names; **stop before writing
+secrets** if permission setup fails. Do not bypass a declined credential-export step.
+The VPS config remains
+the private source of credentials; do not claim local export succeeded without evidence.
 
----
-
-## 6. Execute the install
+## 5. Install, preserving the exit status
 
 ```bash
-ssh -T root@$VPS 'cd /root/adguard-stealth-dns && setsid ./install.sh --yes </dev/null >/tmp/agent-install.out 2>&1; echo "EXIT=$?"; tail -40 /tmp/agent-install.out'
+"${SSH[@]}" 'bash -s' <<'REMOTE'
+set -euo pipefail
+cd /root/adguard-stealth-dns
+umask 077
+output=$(mktemp /root/agent-install.XXXXXX.out)
+printf 'Private transcript: %s\n' "$output"
+rc=0
+setsid --wait bash ./install.sh --yes </dev/null >"$output" 2>&1 || rc=$?
+printf 'Installer exit: %s\n' "$rc"
+grep -E 'Smoke tests:|FAIL :|Step .* failed' "$output" || true
+exit "$rc"
+REMOTE
 ```
 
-Why each piece:
+Use a long enough SSH/tool timeout for package downloads and ACME. `--yes` authorizes
+the firewall step without another confirmation; required values must already exist.
+Keep transcripts private: output/logs contain the secret admin path even though passwords
+are not intentionally printed. Do not paste raw logs or configs; redact secrets first.
 
-* `./install.sh --yes` → non-interactive; skips all confirmations (firewall ACK, etc.).
-* `setsid … </dev/null` → guarantees no TTY, so an accidental missing variable produces an
-  immediate, actionable `die` instead of a silent hang.
-* `>/tmp/agent-install.out` → the full transcript for you to parse (progress messages go to
-  stderr, log lines to `/var/log/adguard-deploy.log`).
-* `echo "EXIT=$?"` → capture the real exit code.
+If the connection drops, inspect the previous process and private transcript before
+starting another run. A live `flock` automatically releases when its holder exits;
+**never unlink `/var/lib/adguard-deploy/.lock`** to bypass it (that can allow concurrent
+installers). Markers are `/var/lib/adguard-deploy/done.<step>`; log is
+`/var/log/adguard-deploy.log` (root-only).
 
-Typical run: **2–6 minutes** (apt + AdGuard Home download dominate).
+Resume with the same `bash ./install.sh --yes` and the same config: completed steps are
+skipped, the failed step retries. `--only 40-cert` or `--only 80-verify` explicitly
+reruns that step even if marked done; **no `--force` needed**. `--force` redoes all
+steps and is not ordinary recovery. Do not regenerate the password/path or delete certs.
 
-**Surviving a dropped connection:** the run is idempotent and resumable, so a broken SSH session
-mid-run is not fatal — reconnect and re-run the same command; completed steps are skipped.
-Because of `setsid`, the run above keeps going even if your SSH session drops: output is already
-redirected to `/tmp/agent-install.out` on the server, so reconnect and read that file.
+Step `50-adguard` downloads the official release archive directly (not AdGuard's
+auto-starting shell installer), creates `/opt/AdGuardHome` mode 700, and launches the
+binary with `--web-addr` bound to loopback on an ephemeral port. It configures through
+the local setup API using a different temporary web port and high, non-privileged loopback
+DNS port numbers. The binary must still be launched as root during initialization; do not
+run this bootstrap as an unprivileged user. It stops the tracked process, then patches final listeners. Existing configs
+bypass initialization. The binary's actual schema version is preserved; never invent
+one or run `AdGuardHome --check-config`. `SKIP_FIREWALL=yes` still means you are
+responsible for provider/external firewall rules and external verification.
 
-**If you see** `Another deploy run is already in progress.` → a previous run is still alive or
-stale. Check `ps -ef | grep install.sh`, and if nothing is running, remove
-`/var/lib/adguard-deploy/.lock`.
+Fresh installs currently pin **v0.107.79**; existing binaries are reused. Retest first-run
+setup/config patching when changing the release pin. Before patching, a private backup
+is saved beside the YAML as `/opt/AdGuardHome/AdGuardHome.yaml.bak.<timestamp>`.
+The full Admin URL is written only to the private deploy log, not terminal output.
 
-### Available flags
+## 6. Verify independently and report truthfully
 
-```text
-sudo ./install.sh                      # interactive (needs a TTY — not for agents)
-sudo ./install.sh --yes                # non-interactive; requires deploy.env or env vars
-sudo ./install.sh --config /path/x.env # specific config file
-sudo ./install.sh --force              # redo every step (destructive on a live box)
-sudo ./install.sh --only 50-adguard    # run a single step (unknown names are rejected)
-sudo ./install.sh --uninstall          # tear everything down (with --yes: NO confirmation!)
-sudo ./install.sh --help
-```
+`80-verify` now **returns nonzero on any failed check**, clears its stale success marker,
+and prevents a misleading deployment-complete message. Still require the current-run
+summary `Smoke tests: N passed, 0 failed.` — counts can change as tests are added.
+Old appended log entries and markers alone do not establish current health.
 
-Idempotency state: `/var/lib/adguard-deploy/done.<step>`. Log: `/var/log/adguard-deploy.log`.
+Require all of these:
 
----
+- All nine `done.*` markers after a complete run; Caddy and AdGuard active.
+- `ufw status verbose` says active **and** `ufw.service` active/enabled, unless firewall
+  management was explicitly skipped; inspect provider rules separately.
+- `certbot.timer` active/enabled; shared cert/key exist with restricted key permissions.
+- AdGuard admin/DoH only on `127.0.0.1:3000`, no extra wildcard/public admin listener.
+- DoT on public `:853`, not just `127.0.0.1:853`; `dns.bind_hosts` controls DoT too.
+  `dns.serve_plain_dns=false` must remain false and public TCP/UDP 53 must stay closed.
+- From the workstation: HTTPS root/random path 200; **both** bare and slash secret
+  paths redirect 302 to exactly `<secret>/login.html`; login page 200 with title
+  `<title>Login</title>` (case-insensitive), no loop/decoy.
+- Real DoH GET **and POST** DNS answers (not merely HTTP 200 or an empty GET), and
+  a real DoT query; see [MANUAL.md Appendix B](MANUAL.md#appendix-b-verification-cheat-sheet).
+- DoT certificate chain trusted, correct hostname and validity. Use bounded
+  `openssl s_client -verify_hostname "$DOMAIN" -verify_return_error -servername "$DOMAIN"`;
+  looking at a printed CN alone does not verify TLS.
+- External 53/3000/3001 inaccessible. Local config/first-run logs/transcripts mode 600,
+  AdGuard directory mode 700. Never dump YAML to verify this.
 
-## 7. Interpret the result (exit code is not enough)
+If checking admin authentication, perform one login and reuse the cookie; honor HTTP
+429/Retry-After. Report unavailable external tests as **not verified**, never passed.
+Deliver the Admin URL/password via the operator's approved private channel and DoH/DoT
+endpoints normally; remind them to save credentials/path in a password manager. Mention
+any pending DNS fixes, benign notices, or incomplete credential export.
 
-**Success criteria = process exit 0 AND zero failed smoke tests AND services active.**
+## 7. Recovery and forbidden shortcuts
 
-1. Exit code (capture the output of the §6 command first, `OUT=...`):
-   ```bash
-   grep -q 'EXIT=0' <<<"$OUT" || echo "INSTALLER FAILED"
-   ```
-   `die()` messages are single-line and actionable — always surface them verbatim.
-2. Smoke test summary (printed by step `80-verify`):
-   ```bash
-   ssh -T root@$VPS "grep -E 'Smoke tests:|FAIL :' /tmp/agent-install.out /var/log/adguard-deploy.log | tail -20"
-   ```
-   Expect `Smoke tests: N passed, 0 failed.` Any `FAIL :` line → go to §9.
-3. Steps completed:
-   ```bash
-   ssh -T root@$VPS 'ls /var/lib/adguard-deploy/'
-   ```
-   Expect `done.00-preflight … done.80-verify` (9 markers).
-4. Services:
-   ```bash
-   ssh -T root@$VPS 'systemctl is-active caddy AdGuardHome ufw; ss -tlnH | grep -E "127.0.0.1:3000|:853"'
-   ```
-   Expect one `active` per unit (`active`, `active`, `active`), a `127.0.0.1:3000` line, and an
-   `:853` line.
+Use [TROUBLESHOOTING.md](TROUBLESHOOTING.md): it covers APT key permissions, executable
+Certbot hooks, parent-domain CAA/SERVFAIL, wizard port collisions, loopback DoT,
+redirect syntax, UFW states, benign package notices, and Windows ACL/export failures.
 
-### Step map (what each stage does and how it fails)
-
-| Step | Does | Hard failure (`exit 1`) | Warning only |
-|---|---|---|---|
-| `00-preflight` | OS, internet, DNS, free ports | no internet, domain does not resolve | DNS not pointing at *this* IP (with `--yes`: continues), port in use by another process |
-| `10-base` | apt packages, timezone | apt failure | timezone not settable; upgrade skipped |
-| `20-firewall` | UFW deny-incoming, allow SSH/80/443/853 | `ufw` missing, `ufw enable` failed | prints all listening sockets; skipped if `SKIP_FIREWALL=yes`; sets `DEFAULT_FORWARD_POLICY=ACCEPT` only if `VPN_FORWARDING=yes` |
-| `30-caddy` | install Caddy, **stop it** (frees :80) | — | already installed |
-| `40-cert` | certbot standalone + shared copy + deploy hook | certbot did not issue, shared cert missing | cert already exists (skips issuance) |
-| `50-adguard` | official installer, config patch, unit, restart | binary/config missing, service did not start | `:3000` bound beyond localhost |
-| `60-decoy` | install the decoy HTML (vendored copy by default; fetch only if `DECOY_URL` set) | empty index file | download failed → vendored fallback used |
-| `70-caddyfile` | render + `caddy validate` + start | validation failed, caddy not active | — |
-| `80-verify` | smoke tests | **never fails the run** | prints `FAIL :` lines |
-
-### Getting the credentials back
-
-The run output ends with:
-
-```text
-Admin URL : https://<domain>/<secret>/
-DoH URL   : https://<domain>/dns-query
-DoT host  : tls://<domain>:853
-```
-
-`SECRET_PATH` is also in `deploy.env` — do **not** `cat` it into your transcript. Fetch only what
-the human needs:
-
-```bash
-ssh -T root@$VPS 'grep -E "Admin URL|DoH URL|DoT host" /var/log/adguard-deploy.log | tail -3'
-```
-
-Report those three lines to the human and remind them to store the secret path in a password
-manager — it is the entire obscurity layer.
-
----
-
-## 8. Independent verification (run from your workstation, not the VPS)
-
-Checks made from the VPS itself can lie (local DNS, local sockets). Verify externally:
-
-```bash
-D=example.com
-# 1) decoy site — expect 200
-curl -s -o /dev/null -w 'root=%{http_code}\n'            https://$D/
-# 2) random path — expect 200 (catch-all decoy)
-curl -s -o /dev/null -w 'random=%{http_code}\n'           https://$D/nothing-here
-# 3) secret admin path — expect 302 (redirect into the prefixed login)
-curl -s -o /dev/null -w 'secret=%{http_code}\n'           https://$D/<secret>/
-# 4) DoH — expect an HTTP response with a DNS payload (see MANUAL.md Appendix B.1 doh_check.py)
-curl -s -o /dev/null -w 'doh_get=%{http_code}\n'           https://$D/dns-query
-# 5) DoT — expect the cert subject to contain the domain and verify OK
-echo | timeout 10 openssl s_client -connect $D:853 -servername $D 2>/dev/null | openssl x509 -noout -subject
-```
-
-Admin UI exposure check (must be localhost-only):
-
-```bash
-ssh -T root@$VPS 'ss -tlnH | grep -q "^LISTEN.*127.0.0.1:3000" && echo ADMIN_LOCAL_ONLY || echo ADMIN_EXPOSED'
-```
-
-`ADMIN_EXPOSED` (or `ss` showing `*:3000` / `0.0.0.0:3000`) is a **security incident** — stop and
-escalate to the human immediately.
-
-For a real end-to-end DoH resolution + block test, use the script in
-[`MANUAL.md` → Appendix B.1](MANUAL.md).
-
----
-
-## 9. Failure playbook (symptom → cause → fix)
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `Domain 'x' does not resolve` (exit 1 at preflight) | A record missing/not propagated | Wait up to 5 min, `dig +short x` from your workstation, re-run. |
-| `x does not resolve to this server's public IP` warning | Wrong A record / multi-A / CDN | Point it at the VPS IP; `--yes` continues anyway and `40-cert` will then fail. |
-| `certbot did not issue a certificate` (exit 1) | Inbound 80 closed (UFW **or** cloud firewall), or DNS wrong | From your workstation: `curl -I http://x/`. Open 80 inbound on both layers, re-run. |
-| `Port 80/443/853 is in use by: …` | nginx/apache/something else | Stop the occupant or free the port; re-run `--only 00-preflight`. |
-| `Another deploy run is already in progress` | Stale lock | `ps -ef \| grep install.sh`; if idle: `rm /var/lib/adguard-deploy/.lock`. |
-| `AdGuardHome did not start` | Bad config / port collision | `journalctl -u AdGuardHome -n 40 --no-pager`; confirm YAML parses; re-run `--only 50-adguard`. |
-| Unit stuck in `activating` / auto-restart | Stray `AdGuardHome` process holding `:3000` (usually from `--check-config`, which you must never run) | `ps -eo pid,ppid,etime,cmd \| grep '[A]dGuardHome'`, kill strays, `systemctl restart AdGuardHome`. |
-| `Caddyfile validation failed` | typo in secret path / TLS path | Inspect printed diagnostics; edit `/etc/caddy/Caddyfile`; re-run `--only 70-caddyfile`. |
-| Smoke test `FAIL : secret path (expected 302)` | caddy not running, or `SECRET_PATH` mismatch | `systemctl restart caddy`; confirm `SECRET_PATH` in `deploy.env` matches what you tested. |
-| Smoke test `FAIL : no listener on :853` | AdGuard down or TLS not wired | `systemctl status AdGuardHome`; re-run `--only 50-adguard`. |
-| `FAIL : 3000 not bound to localhost only` | `http.address` misconfigured | Treat as security issue: stop, inspect `/opt/AdGuardHome/AdGuardHome.yaml`. |
-| SSH session died during firewall step | `SSH_PORT` wrong / cloud firewall | Restore access from the provider console; fix `SSH_PORT` or `SKIP_FIREWALL=yes`, re-run. |
-| HTTP `429` while probing admin login | AdGuard rate-limits logins | Log in once, reuse the session cookie (MANUAL.md Appendix B.3). Never loop on `/control/login`. |
-| DNS not resolving yet when you run verify | Propagation delay | Re-run `80-verify` later: `./install.sh --yes --force --only 80-verify`. |
-
-Re-running is always safe: `./install.sh --yes` skips completed steps.
-
----
-
-## 10. Rollback and uninstall
-
-```bash
-ssh -T root@$VPS 'cd /root/adguard-stealth-dns && setsid ./install.sh --uninstall --yes </dev/null >/tmp/uninstall.out 2>&1; echo EXIT=$?; tail -30 /tmp/uninstall.out'
-```
-
-> ⚠️ **`--uninstall --yes` skips the confirmation prompt** and removes Caddy, certbot, AdGuard
-> Home, `/var/www/fake`, `/etc/ssl/adguard`, the deploy hook and the AdGuard unit, the Caddy apt
-> repo/keyring, `deploy.env` (both `repo/deploy.env` and `/etc/adguard-deploy/deploy.env`), the
-> log (`/var/log/adguard-deploy.log`), and the idempotency state. Always get explicit
-> human approval first — this is irreversible from the agent's side.
-
-Left behind deliberately: Let's Encrypt live certs (`certbot delete --cert-name <domain>` to
-remove), UFW rules (`ufw reset` to clear — never do this to a remote box without console
-access), and the DNS A/AAAA records still pointing at the server. Per-step config backups live at
-`/root/AdGuardHome.yaml.bak.<timestamp>`.
-
----
-
-## 11. Never do this
-
-1. **Never** `certbot renew --dry-run` while the deploy hook is installed — a *staging*
-   certificate gets copied over the live one. Disable the hook first.
-2. **Never** `AdGuardHome --check-config`. On v0.107.x it can spawn a full instance that never
-   exits, grabs `:3000`, and loops the unit. Validate YAML structurally instead.
-3. **Never** print, `cat`, `grep -r`, `git add` or commit `deploy.env` — it holds the admin
-   password and the secret path.
-4. **Never** change `http.address` to `0.0.0.0:3000`, disable `insecure_enabled`, or lower
-   `schema_version` — admin exposure / DoH breakage / silent config migration.
-5. **Never** re-run admin login in a loop (429 rate limit); one login, reuse the cookie.
-6. **Never** remove the SSH UFW rule or `ufw reset`/`ufw disable` on a remote box.
-7. **Never** run `--yes` unless every required variable is present in `deploy.env` or the
-   environment — otherwise it either dies mid-flight or, if a TTY happens to exist, blocks on a
-   prompt forever.
-8. **Never** run `--force`, `--uninstall`, or repo-deletion actions without human approval.
-9. **Never** assume exit 0 == healthy (§7).
-10. **Never** set `SKIP_FIREWALL=yes` on an internet-facing box without otherwise blocking
-    `:3000` — AdGuard's first-run setup wizard is briefly reachable on `0.0.0.0:3000` until step
-    `50-adguard` patches the config.
-
----
-
-## 12. Definition of done
-
-Report to the human only after **all** of these pass:
-
-- [ ] `EXIT=0` and no `FAIL :` lines in the installer output (`Smoke tests: N passed, 0 failed.`)
-- [ ] All 9 `done.*` markers present in `/var/lib/adguard-deploy/`
-- [ ] `caddy`, `AdGuardHome`, `ufw` all `active`
-- [ ] `127.0.0.1:3000` bound; no `0.0.0.0:3000` / `*:3000`
-- [ ] From your workstation: `/` → 200, random path → 200, secret path → 302, DoT cert CN matches
-- [ ] DoH resolves a real name (MANUAL.md Appendix B.1)
-- [ ] Admin URL + DoH URL + DoT host reported to the human; secret path flagged for password manager
-- [ ] `deploy.env` present with mode `600` on the server; no secret left in your transcript or repo
-
-Optional follow-ups to offer the human: key-only SSH, disabling password auth (MANUAL.md §15),
-and `EXTRA_ALLOW` for any VPN ports.
+Never disable APT signature checking, ACME/TLS verification, expose the wizard to fix
+setup, print secrets, blindly kill unrelated processes, reset UFW remotely, or delete
+state/certs to resume. Do not run `certbot renew --dry-run` carelessly with deploy hooks;
+avoid copying staging certificates over trusted live files. Destructive teardown
+(`bash ./install.sh --uninstall --yes`) skips confirmation and needs explicit approval.
+See the human manual for exactly what uninstall removes and leaves behind.

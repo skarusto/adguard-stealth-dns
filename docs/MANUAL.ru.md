@@ -108,7 +108,7 @@ ADMIN_PASS="CHANGE_ME_TO_SOMETHING_STRONG"
 
 ## 2. Требования
 
-- VPS под **Debian 12/13** или **Ubuntu 22.04/24.04**, x86_64 или arm64.
+- VPS под **Debian 12/13** или **Ubuntu 22.04/24.04**. Закреплённый релиз AdGuard поддерживает amd64, arm64, armv7, armv6 и 386 (включая распространённые псевдонимы `x86_64`/`aarch64`).
 - Доступ **root** (или sudo).
 - **Публичный IPv4**.
 - **Имя хоста** (`DOMAIN`), A-запись которого (и, при желании, AAAA) указывает на VPS. Если IP вашего домашнего/серверного подключения меняется, используйте динамический DNS (DuckDNS, `linkpc.net`, `afraid.org` и т. п.) или полноценный домен.
@@ -163,6 +163,8 @@ apt -y install curl wget gnupg ca-certificates apt-transport-https \
 timedatectl set-timezone UTC
 ```
 
+`apt-utils` необязателен: сообщение debconf о задержке настройки пакетов на минимальном образе обычно безвредно, если apt завершился успешно.
+
 Убедитесь, что на самом сервере работает разрешение имён (нужно для установки пакетов):
 
 ```bash
@@ -203,6 +205,7 @@ ufw allow 853/tcp         # DoT
 # sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
 
 ufw --force enable
+systemctl enable --now ufw
 ufw status verbose
 ```
 
@@ -217,9 +220,11 @@ ufw status verbose
 ```bash
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
   | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+chmod 644 /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
   | tee /etc/apt/sources.list.d/caddy-stable.list
+chmod 644 /etc/apt/sources.list.d/caddy-stable.list
 
 apt update
 apt -y install caddy
@@ -239,6 +244,7 @@ systemctl stop caddy
 
 ```bash
 apt -y install certbot
+systemctl enable --now certbot.timer
 ```
 
 ### 7.1 Создайте общий каталог сертификата
@@ -254,7 +260,7 @@ install -d -m 755 /etc/ssl/adguard
 ```bash
 certbot certonly --standalone \
   --pre-hook  "systemctl stop caddy || true" \
-  --post-hook "systemctl start caddy || true" \
+  --post-hook "/bin/sh -c 'if [ -s /etc/caddy/Caddyfile ] && grep -q /etc/ssl/adguard/fullchain.pem /etc/caddy/Caddyfile && [ -s /etc/ssl/adguard/fullchain.pem ] && [ -s /etc/ssl/adguard/privkey.pem ]; then systemctl restart caddy || true; fi'" \
   -d "$DOMAIN" \
   -m "$EMAIL" \
   --agree-tos --no-eff-email --non-interactive
@@ -310,21 +316,24 @@ ls -l /etc/ssl/adguard/
 
 ## 8. Установка AdGuard Home
 
-Используйте официальный установщик:
+Для новых автоматических установок закреплён официальный архив **v0.107.79**.
+Существующие бинарники сохраняются, а не обновляются без предупреждения. При смене
+закреплённого релиза нужно заново проверить API настройки и патчинг его конфигурации.
 
-```bash
-curl -s -S -L https://raw.githubusercontent.com/AdguardTeam/AdGuardHome/master/scripts/install.sh | sh -s -- -v
-```
+Для рекомендуемой первичной настройки используйте установщик этого репозитория (`sudo ./install.sh`), шаг `50-adguard`: он скачивает официальный архив релиза AdGuard Home и безопасно выполняет первичную настройку. **Не запускайте здесь `scripts/install.sh` AdGuard через curl | sh**: он автоматически запускает мастер настройки по умолчанию до применения защитных настроек этого проекта.
 
-Он скачивает AdGuard Home в `/opt/AdGuardHome`, устанавливает systemd-юнит (`AdGuardHome.service`) и запускает **мастер первоначальной настройки** на `:3000` (временно слушающий на всех интерфейсах).
+Установщик проекта создаёт `/opt/AdGuardHome` с правами root-only `0700`, затем запускает скачанный бинарник с веб-слушателем на временном loopback-порту. Настройка завершается локально через API, на отдельном временном веб-порту и высоких непривилегированных loopback-портах DNS. Сам бинарник при первичной настройке всё равно должен запускаться от root; речь идёт о номерах портов, а не о непривилегированном процессе. Затем вспомогательный процесс останавливается, а сгенерированный конфиг патчится под итоговые слушатели. Версия схемы сохраняется из фактического бинарника; существующий конфиг пропускает первичную настройку. Итог: админка/DoH только на `127.0.0.1:3000`, обычный DNS отключён, DoT доступен публично на `:853` с публичным `dns.bind_hosts`.
 
-### 8.1 Прогоните мастер настройки один раз (чтобы задать учётную запись администратора)
+Если вы намеренно выполняете остальную часть этого руководства без установщика проекта, самостоятельно установите официальный бинарник/архив релиза и проходите мастер первичной настройки только через защищённый SSH-туннель. Не запускайте upstream shell-установщик и не выставляйте мастер публично. Для большинства установок используйте проектный установщик для этой сложной части.
+
+### 8.1 Ручной запуск мастера (установщик проекта его не использует)
 
 Сделайте это через SSH-туннель, чтобы `:3000` никогда не выставлялся публично:
 
 ```bash
 # с ВАШЕЙ машины:
-ssh -L 3000:127.0.0.1:3000 root@<VPS_IP>
+VPS_IP=YOUR_VPS_IP # замените адресом сервера
+ssh -L 3000:127.0.0.1:3000 "root@$VPS_IP"
 # затем откройте http://127.0.0.1:3000 в браузере
 ```
 
@@ -354,7 +363,7 @@ http:
 
 dns:
   bind_hosts:
-    - 0.0.0.0                    # куда AdGuard привязал бы обычный DNS (не используется, см. ниже)
+    - 0.0.0.0                    # публичная привязка нужна DoT; обычный DNS отключён ниже
   port: 53
   serve_plain_dns: false         # (3) НИКАКОГО публичного обычного DNS на :53
   # ... ваши upstream_dns / bootstrap_dns / fallback_dns / и т. д. остаются здесь ...
@@ -369,12 +378,14 @@ tls:
   port_dns_over_tls: 853         # (6) здесь живёт публичный DoT
   port_dns_over_quic: 0          # (7) DoQ ВЫКЛ
 
-schema_version: 34               # (8) ЗАФИКСИРУЙТЕ ЭТО -- см. предупреждение ниже
+# Сохраните существующий schema_version, сгенерированный этим бинарником; не меняйте его.
 ```
 
 Затем примените владельца и перезапустите:
 
 ```bash
+chown root:root /opt/AdGuardHome
+chmod 700 /opt/AdGuardHome
 chown root:root /opt/AdGuardHome/AdGuardHome.yaml
 chmod 600 /opt/AdGuardHome/AdGuardHome.yaml
 systemctl start AdGuardHome
@@ -385,7 +396,7 @@ ss -tlnp | grep AdGuardHome      # ожидайте ТОЛЬКО 127.0.0.1:3000 
 
 ### Почему важна каждая пронумерованная строка
 
-1. **`http.address: 127.0.0.1:3000`** — если оставить значение мастера по умолчанию (`0.0.0.0:3000`), админка будет доступна по `http://<VPS_IP>:3000` (и через домен, если что-то его проксирует), что разрушает всю идею «скрытой админки».
+1. **`http.address: 127.0.0.1:3000`** — при ручном прохождении мастера не оставляйте публичную привязку вроде `0.0.0.0:3000`: так админка будет доступна напрямую. Установщик проекта запускает слушатели первичной настройки только на loopback.
 2. **`http.doh.insecure_enabled: true`** — эндпоинт DoH в AdGuard обычно требует HTTPS. За реверс-прокси TLS завершается выше по стеку, поэтому AdGuard надо явно указать принимать обычный HTTP DoH. **Это самая частая причина неработающего `/dns-query`.**
 3. **`dns.serve_plain_dns: false`** — обычный DNS наружу не выставляется.
 4. **пути к сертификату** — указывают на общую копию, которой управляет deploy-хук certbot.
@@ -394,7 +405,7 @@ ss -tlnp | grep AdGuardHome      # ожидайте ТОЛЬКО 127.0.0.1:3000 
 7. **`tls.port_dns_over_quic: 0`** — DoQ выключен (не требуется; минимальная поверхность атаки).
 8. **`schema_version`** — см. ниже.
 
-> **Мина версии схемы.** Если позволить AdGuard выполнить миграцию конфига (записав конфиг с `schema_version` *ниже*, чем ожидает бинарник, и затем перезапустившись), он перепишет YAML и может (а) заново вложить `bootstrap_dns` так, что это перестанет парситься, и (б) отбросить новые ключи вроде `http.doh.insecure_enabled`. Для конфига из *более старого* AdGuard задайте `schema_version` равным значению, которое использует **текущий** бинарник (узнать можно через `AdGuardHome --version` / один раз прогнав мастер и прочитав сгенерированный файл) и держите его зафиксированным. В эталонном развёртывании зафиксировано **34**.
+> **Мина версии схемы.** Если позволить AdGuard выполнить миграцию конфига (записав `schema_version` ниже ожидаемого бинарником), YAML может быть переписан, а новые ключи вроде `http.doh.insecure_enabled` — потеряны. Сохраняйте версию, созданную **текущим бинарником**; не копируйте фиксированное число из другого релиза и не меняйте его вручную. Установщик проекта патчит сгенерированный файл, не меняя эту версию.
 
 ### Systemd-юнит
 
@@ -459,42 +470,40 @@ DOMAIN {
 	# Использовать общий сертификат от certbot (его же применяет AdGuard для DoT)
 	tls /etc/ssl/adguard/fullchain.pem /etc/ssl/adguard/privkey.pem
 
-	# ---- 1. Публичный эндпоинт DoH (RFC 8484), GET + POST -> AdGuard ----
-	handle /dns-query {
-		reverse_proxy 127.0.0.1:3000
-	}
+	# Явный route сохраняет порядок: иначе Caddy может поставить wildcard раньше.
+	route {
+		# ---- 1. Публичный эндпоинт DoH (RFC 8484), GET + POST -> AdGuard ----
+		handle /dns-query {
+			reverse_proxy 127.0.0.1:3000
+		}
 
-	# ---- 2. Голый секретный путь -> добавляем слэш на конце ----
-	handle SECRET_PATH {
-		redir SECRET_PATH/ 302
-	}
+		# ---- 2. Голый путь и путь со слэшем -> страница входа с префиксом ----
+		handle SECRET_PATH {
+			redir * SECRET_PATH/login.html 302
+		}
+		handle SECRET_PATH/ {
+			redir * SECRET_PATH/login.html 302
+		}
 
-	# ---- 3. Секретная админка -> AdGuard, префикс срезается на бэкенде,
-	#         а корневые абсолютные редиректы снова получают префикс на пути назад ----
-	handle SECRET_PATH/* {
-		uri strip_prefix SECRET_PATH
-		header >Location ^/(.*)$ SECRET_PATH/$1
-		reverse_proxy 127.0.0.1:3000
-	}
+		# ---- 3. Секретная админка -> AdGuard, префикс срезается на бэкенде,
+		#         корневые абсолютные редиректы получают префикс на пути назад ----
+		handle SECRET_PATH/* {
+			uri strip_prefix SECRET_PATH
+			header >Location ^/(.*)$ SECRET_PATH/$1
+			reverse_proxy 127.0.0.1:3000
+		}
 
-	# ---- 4. Всё остальное -> сайт-приманка ----
-	handle {
-		root * /var/www/fake
-		try_files {path} /index.html
-		file_server
+		# ---- 4. Всё остальное -> сайт-приманка ----
+		handle {
+			root * /var/www/fake
+			try_files {path} /index.html
+			file_server
+		}
 	}
 }
 ```
 
-Для эталонного примера две строки с `SECRET_PATH` становятся `/REDACTED_SECRET_PATH`. Конкретно, обработчик 3 выглядит так:
-
-```caddyfile
-	handle /REDACTED_SECRET_PATH/* {
-		uri strip_prefix /REDACTED_SECRET_PATH
-		header >Location ^/(.*)$ /REDACTED_SECRET_PATH/$1
-		reverse_proxy 127.0.0.1:3000
-	}
-```
+Оставьте явный `route`: он сохраняет порядок обработчиков из [`templates/Caddyfile`](../templates/Caddyfile), чтобы точные редиректы голого пути/пути со слэшем проверялись раньше wildcard. Замените `SECRET_PATH` на свой приватный путь и не публикуйте его.
 
 Проверьте и запустите:
 
@@ -559,12 +568,17 @@ curl -s  "https://$DOMAIN/" | grep -io '<title>[^<]*</title>' | head -1
 # 3) Случайный путь тоже отдаёт приманку (catch-all). Ожидайте 200.
 curl -sI "https://$DOMAIN/some/random/path" | head -1
 
-# 4) Секретный путь админки. Ожидайте 302 (редирект внутрь страницы входа с префиксом).
-curl -sI "https://$DOMAIN$SECRET_PATH/" | head -1
+# 4) Оба варианта должны вернуть 302 и точный Location с префиксом; страница входа — 200.
+for path in "$SECRET_PATH" "$SECRET_PATH/"; do
+  result=$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' "https://$DOMAIN$path")
+  printf '%s -> %s\n' "$path" "$result"
+  [ "$result" = "302 https://$DOMAIN$SECRET_PATH/login.html" ] || exit 1
+done
+curl -sI "https://$DOMAIN$SECRET_PATH/login.html" | head -1 # ожидайте 200
 
-# 5) DoT. Ожидайте, что субъект/имя сертификата совпадает с DOMAIN и проверка проходит.
-echo | openssl s_client -connect $DOMAIN:853 -servername $DOMAIN 2>/dev/null \
-  | openssl x509 -noout -subject -issuer
+# 5) DoT: проверяйте доверенную цепочку и имя, а не только напечатанный CN.
+timeout 15 openssl s_client -brief -verify_return_error -verify_hostname "$DOMAIN" \
+  -connect "$DOMAIN:853" -servername "$DOMAIN" </dev/null
 ```
 
 Для настоящей сквозной проверки разрешения имён используйте скрипт из приложения §17.1 и убедитесь, что:
@@ -653,6 +667,8 @@ systemctl is-active AdGuardHome && echo OK || { echo "НЕУДАЧА -> отка
 ---
 
 ## 14. Подводные камни и мины
+
+Ошибки установщика, безвредные уведомления и безопасное возобновление описаны в отдельном [руководстве по устранению неполадок](TROUBLESHOOTING.md).
 
 Это ровно те ловушки, что встретились при сборке эталонного развёртывания. Прочтите их до развёртывания.
 
@@ -799,14 +815,22 @@ ss -tlnp | grep -E ':(80|443|853|3000)\b'                     # 3000 долже�
 ### B.3 Проверка через API админки (один вход, переиспользование cookie)
 
 ```bash
-SP="/a1b2c3d4e5f60718"; H="https://$DOMAIN"
-curl -s -c /tmp/cj -o /dev/null -w 'login: %{http_code}\n' \
-  -X POST "$H$SP/control/login" -H 'content-type: application/json' \
-  -d '{"name":"admin","password":"YOURPASS"}'
-curl -s -b /tmp/cj "$H$SP/control/status" | head -c 200; echo
-curl -s -b /tmp/cj "$H$SP/control/filtering/status" | head -c 300; echo
-rm -f /tmp/cj
+SP="/YOUR_SECRET"; H="https://$DOMAIN"  # настоящий приватный путь; не публикуйте его
+umask 077; CJ=$(mktemp /root/adguard-cookie.XXXXXX)
+read -r -p 'Admin username: ' ADMIN_USER
+read -r -s -p 'Admin password: ' ADMIN_PASS; printf '\n'
+export ADMIN_USER ADMIN_PASS
+python3 -c 'import json,os; print(json.dumps({"name":os.environ["ADMIN_USER"],"password":os.environ["ADMIN_PASS"]}))' \
+  | curl -s -c "$CJ" -o /dev/null -w 'login: %{http_code}\n' \
+    -X POST "$H$SP/control/login" -H 'content-type: application/json' --data-binary @-
+unset ADMIN_PASS
+curl -s -b "$CJ" "$H$SP/control/status" | head -c 200; echo
+curl -s -b "$CJ" "$H$SP/control/filtering/status" | head -c 300; echo
+rm -f "$CJ"
 ```
+
+Выполняйте только в приватном терминале без трассировки shell. Пароль передаётся через
+stdin, а не аргументы `curl`. Соблюдайте HTTP 429/Retry-After; не повторяйте вход в цикле.
 
 ---
 
@@ -816,7 +840,7 @@ rm -f /tmp/cj
 
 ```bash
 systemctl stop AdGuardHome
-cp -a /root/AdGuardHome.yaml.bak.<timestamp> /opt/AdGuardHome/AdGuardHome.yaml
+cp -a /opt/AdGuardHome/AdGuardHome.yaml.bak.<timestamp> /opt/AdGuardHome/AdGuardHome.yaml
 systemctl start AdGuardHome
 ```
 
